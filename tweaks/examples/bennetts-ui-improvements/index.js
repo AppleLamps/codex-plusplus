@@ -134,57 +134,6 @@ function renderSettings(root, state) {
   }
   section.appendChild(card);
   root.appendChild(section);
-
-  // ── Debug ─────────────────────────────────────────────────────────────
-  // Quick utilities for iterating on tweaks. The "Dump sidebar DOM" button
-  // walks the document for the left-edge sidebar element and writes its
-  // outerHTML (plus a few candidate selectors) somewhere we can read. This
-  // is how we figure out which classes to target for new tweaks.
-  const debug = el("section", "flex flex-col gap-2 mt-4");
-  debug.appendChild(sectionTitle("Debug"));
-  const debugCard = roundedCard();
-  debugCard.appendChild(dumpSidebarRow(state));
-  debug.appendChild(debugCard);
-  root.appendChild(debug);
-}
-
-function dumpSidebarRow(state) {
-  const row = el("div", "flex items-center justify-between gap-4 p-3");
-  const left = el("div", "flex min-w-0 flex-col gap-1");
-  const label = el("div", "min-w-0 text-sm text-token-text-primary");
-  label.textContent = "Dump sidebar DOM";
-  const desc = el("div", "text-token-text-secondary min-w-0 text-sm");
-  desc.textContent =
-    "Copy the sidebar's HTML to the clipboard and write it to sidebar-dump.html for inspection.";
-  left.append(label, desc);
-  row.appendChild(left);
-
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className =
-    "h-token-button-composer rounded-md border border-token-border " +
-    "bg-token-foreground/5 hover:bg-token-foreground/10 px-3 text-sm " +
-    "text-token-text-primary cursor-interaction";
-  btn.textContent = "Dump";
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    btn.textContent = "Dumping…";
-    try {
-      const result = await dumpSidebar(state.api);
-      btn.textContent = result.ok ? "Copied ✓" : "Failed";
-      state.api.log.info("sidebar dump", result);
-    } catch (e) {
-      btn.textContent = "Error";
-      state.api.log.error("dump failed", e);
-    } finally {
-      setTimeout(() => {
-        btn.textContent = "Dump";
-        btn.disabled = false;
-      }, 1500);
-    }
-  });
-  row.appendChild(btn);
-  return row;
 }
 
 /**
@@ -195,7 +144,11 @@ function dumpSidebarRow(state) {
  *   • narrow-ish width (< 360px) for collapsed/expanded sidebars
  *   • presence of `nav` or aria-label="Primary"
  * and pick the best. Returns the chosen element + a few selector hints.
+ *
+ * Currently unused — kept around for ad-hoc DOM debugging during tweak
+ * development. Wire it up to a temporary button if needed.
  */
+// eslint-disable-next-line no-unused-vars
 async function dumpSidebar(api) {
   const candidates = [];
   const all = document.querySelectorAll(
