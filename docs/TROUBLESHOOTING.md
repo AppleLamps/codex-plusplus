@@ -23,13 +23,13 @@ xattr -dr com.apple.quarantine /Applications/Codex.app
 
 ## Codex auto-updated and the patch is gone
 
-Run:
+The watcher should normally re-apply the patch automatically. To force it immediately, run:
 
 ```sh
 codex-plusplus repair
 ```
 
-The watcher should detect this automatically next login. Check it's installed:
+Check the watcher is installed:
 
 ```sh
 launchctl list | grep codexplusplus      # macOS

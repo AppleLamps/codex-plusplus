@@ -13,6 +13,12 @@ export interface TweakManifest {
   name: string;
   /** Semver version of this tweak. */
   version: string;
+  /**
+   * Required source repository in `owner/repo` form. Codex++ checks this
+   * repository's latest GitHub release once per day and only reports update
+   * availability; it never downloads or installs tweak updates automatically.
+   */
+  githubRepo: string;
   /** Free-form one-liner description. Renders below the name. */
   description?: string;
   /** Author info. Either a string (display name) or a structured record. */

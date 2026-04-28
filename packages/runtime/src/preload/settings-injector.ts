@@ -36,6 +36,34 @@ interface ListedTweak {
   dir: string;
   entryExists: boolean;
   enabled: boolean;
+  update: TweakUpdateCheck | null;
+}
+
+interface TweakUpdateCheck {
+  checkedAt: string;
+  repo: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  latestTag: string | null;
+  releaseUrl: string | null;
+  updateAvailable: boolean;
+  error?: string;
+}
+
+interface CodexPlusPlusConfig {
+  version: string;
+  autoUpdate: boolean;
+  updateCheck: CodexPlusPlusUpdateCheck | null;
+}
+
+interface CodexPlusPlusUpdateCheck {
+  checkedAt: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseUrl: string | null;
+  releaseNotes: string | null;
+  updateAvailable: boolean;
+  error?: string;
 }
 
 /**
@@ -597,16 +625,204 @@ function rerender(): void {
 function renderConfigPage(sectionsWrap: HTMLElement): void {
   const section = document.createElement("section");
   section.className = "flex flex-col gap-2";
-  section.appendChild(sectionTitle("General"));
+  section.appendChild(sectionTitle("Codex++ Updates"));
   const card = roundedCard();
-  card.appendChild(
-    rowSimple(
-      "Coming soon",
-      "Codex++ runtime configuration (auto-update, log level, etc.) will live here.",
-    ),
-  );
+  const loading = rowSimple("Loading update settings", "Checking current Codex++ configuration.");
+  card.appendChild(loading);
   section.appendChild(card);
   sectionsWrap.appendChild(section);
+
+  void ipcRenderer
+    .invoke("codexpp:get-config")
+    .then((config) => {
+      card.textContent = "";
+      renderCodexPlusPlusConfig(card, config as CodexPlusPlusConfig);
+    })
+    .catch((e) => {
+      card.textContent = "";
+      card.appendChild(rowSimple("Could not load update settings", String(e)));
+    });
+
+  const maintenance = document.createElement("section");
+  maintenance.className = "flex flex-col gap-2";
+  maintenance.appendChild(sectionTitle("Maintenance"));
+  const maintenanceCard = roundedCard();
+  maintenanceCard.appendChild(uninstallRow());
+  maintenanceCard.appendChild(reportBugRow());
+  maintenance.appendChild(maintenanceCard);
+  sectionsWrap.appendChild(maintenance);
+}
+
+function renderCodexPlusPlusConfig(card: HTMLElement, config: CodexPlusPlusConfig): void {
+  card.appendChild(autoUpdateRow(config));
+  card.appendChild(checkForUpdatesRow(config.updateCheck));
+  if (config.updateCheck) card.appendChild(releaseNotesRow(config.updateCheck));
+}
+
+function autoUpdateRow(config: CodexPlusPlusConfig): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "flex items-center justify-between gap-4 p-3";
+  const left = document.createElement("div");
+  left.className = "flex min-w-0 flex-col gap-1";
+  const title = document.createElement("div");
+  title.className = "min-w-0 text-sm text-token-text-primary";
+  title.textContent = "Automatically refresh Codex++";
+  const desc = document.createElement("div");
+  desc.className = "text-token-text-secondary min-w-0 text-sm";
+  desc.textContent = `Installed version v${config.version}. The watcher can refresh the Codex++ runtime after you rerun the GitHub installer.`;
+  left.appendChild(title);
+  left.appendChild(desc);
+  row.appendChild(left);
+  row.appendChild(
+    switchControl(config.autoUpdate, async (next) => {
+      await ipcRenderer.invoke("codexpp:set-auto-update", next);
+    }),
+  );
+  return row;
+}
+
+function checkForUpdatesRow(check: CodexPlusPlusUpdateCheck | null): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "flex items-center justify-between gap-4 p-3";
+  const left = document.createElement("div");
+  left.className = "flex min-w-0 flex-col gap-1";
+  const title = document.createElement("div");
+  title.className = "min-w-0 text-sm text-token-text-primary";
+  title.textContent = check?.updateAvailable ? "Codex++ update available" : "Codex++ is up to date";
+  const desc = document.createElement("div");
+  desc.className = "text-token-text-secondary min-w-0 text-sm";
+  desc.textContent = updateSummary(check);
+  left.appendChild(title);
+  left.appendChild(desc);
+  row.appendChild(left);
+
+  const actions = document.createElement("div");
+  actions.className = "flex shrink-0 items-center gap-2";
+  if (check?.releaseUrl) {
+    actions.appendChild(
+      compactButton("Release Notes", () => {
+        void ipcRenderer.invoke("codexpp:open-external", check.releaseUrl);
+      }),
+    );
+  }
+  actions.appendChild(
+    compactButton("Check Now", () => {
+      row.style.opacity = "0.65";
+      void ipcRenderer
+        .invoke("codexpp:check-codexpp-update", true)
+        .then((next) => {
+          const card = row.parentElement;
+          if (!card) return;
+          card.textContent = "";
+          void ipcRenderer.invoke("codexpp:get-config").then((config) => {
+            renderCodexPlusPlusConfig(card, {
+              ...(config as CodexPlusPlusConfig),
+              updateCheck: next as CodexPlusPlusUpdateCheck,
+            });
+          });
+        })
+        .catch((e) => plog("Codex++ update check failed", String(e)))
+        .finally(() => {
+          row.style.opacity = "";
+        });
+    }),
+  );
+  row.appendChild(actions);
+  return row;
+}
+
+function releaseNotesRow(check: CodexPlusPlusUpdateCheck): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "flex flex-col gap-2 p-3";
+  const title = document.createElement("div");
+  title.className = "text-sm text-token-text-primary";
+  title.textContent = "Latest release notes";
+  row.appendChild(title);
+  const body = document.createElement("pre");
+  body.className =
+    "max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-token-border bg-token-foreground/5 p-3 text-xs text-token-text-secondary";
+  body.textContent = check.releaseNotes?.trim() || check.error || "No release notes available.";
+  row.appendChild(body);
+  return row;
+}
+
+function updateSummary(check: CodexPlusPlusUpdateCheck | null): string {
+  if (!check) return "No update check has run yet.";
+  const latest = check.latestVersion ? `Latest v${check.latestVersion}. ` : "";
+  const checked = `Checked ${new Date(check.checkedAt).toLocaleString()}.`;
+  if (check.error) return `${latest}${checked} ${check.error}`;
+  return `${latest}${checked}`;
+}
+
+function uninstallRow(): HTMLElement {
+  const row = actionRow(
+    "Uninstall Codex++",
+    "Copies the uninstall command. Run it from a terminal after quitting Codex.",
+  );
+  const action = row.querySelector<HTMLElement>("[data-codexpp-row-actions]");
+  action?.appendChild(
+    compactButton("Copy Command", () => {
+      void ipcRenderer
+        .invoke("codexpp:copy-text", "node ~/.codex-plusplus/source/packages/installer/dist/cli.js uninstall")
+        .catch((e) => plog("copy uninstall command failed", String(e)));
+    }),
+  );
+  return row;
+}
+
+function reportBugRow(): HTMLElement {
+  const row = actionRow(
+    "Report a bug",
+    "Open a GitHub issue with runtime, installer, or tweak-manager details.",
+  );
+  const action = row.querySelector<HTMLElement>("[data-codexpp-row-actions]");
+  action?.appendChild(
+    compactButton("Open Issue", () => {
+      const title = encodeURIComponent("[Bug]: ");
+      const body = encodeURIComponent(
+        [
+          "## What happened?",
+          "",
+          "## Steps to reproduce",
+          "1. ",
+          "",
+          "## Environment",
+          "- Codex++ version: ",
+          "- Codex app version: ",
+          "- OS: ",
+          "",
+          "## Logs",
+          "Attach relevant lines from the Codex++ log directory.",
+        ].join("\n"),
+      );
+      void ipcRenderer.invoke(
+        "codexpp:open-external",
+        `https://github.com/b-nnett/codex-plusplus/issues/new?title=${title}&body=${body}`,
+      );
+    }),
+  );
+  return row;
+}
+
+function actionRow(titleText: string, description: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "flex items-center justify-between gap-4 p-3";
+  const left = document.createElement("div");
+  left.className = "flex min-w-0 flex-col gap-1";
+  const title = document.createElement("div");
+  title.className = "min-w-0 text-sm text-token-text-primary";
+  title.textContent = titleText;
+  const desc = document.createElement("div");
+  desc.className = "text-token-text-secondary min-w-0 text-sm";
+  desc.textContent = description;
+  left.appendChild(title);
+  left.appendChild(desc);
+  row.appendChild(left);
+  const actions = document.createElement("div");
+  actions.dataset.codexppRowActions = "true";
+  actions.className = "flex shrink-0 items-center gap-2";
+  row.appendChild(actions);
+  return row;
 }
 
 function renderTweaksPage(sectionsWrap: HTMLElement): void {
@@ -749,6 +965,13 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
     ver.textContent = `v${m.version}`;
     titleRow.appendChild(ver);
   }
+  if (t.update?.updateAvailable) {
+    const badge = document.createElement("span");
+    badge.className =
+      "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] font-medium text-token-text-primary";
+    badge.textContent = "Update Available";
+    titleRow.appendChild(badge);
+  }
   stack.appendChild(titleRow);
 
   if (m.description) {
@@ -762,6 +985,19 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
   meta.className = "flex items-center gap-2 text-xs text-token-text-secondary";
   const authorEl = renderAuthor(m.author);
   if (authorEl) meta.appendChild(authorEl);
+  if (m.githubRepo) {
+    if (meta.children.length > 0) meta.appendChild(dot());
+    const repo = document.createElement("button");
+    repo.type = "button";
+    repo.className = "inline-flex text-token-text-link-foreground hover:underline";
+    repo.textContent = m.githubRepo;
+    repo.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void ipcRenderer.invoke("codexpp:open-external", `https://github.com/${m.githubRepo}`);
+    });
+    meta.appendChild(repo);
+  }
   if (m.homepage) {
     if (meta.children.length > 0) meta.appendChild(dot());
     const link = document.createElement("a");
@@ -794,6 +1030,13 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
   // ── Toggle ────────────────────────────────────────────────────────────
   const right = document.createElement("div");
   right.className = "flex shrink-0 items-center gap-2 pt-0.5";
+  if (t.update?.updateAvailable && t.update.releaseUrl) {
+    right.appendChild(
+      compactButton("Review Release", () => {
+        void ipcRenderer.invoke("codexpp:open-external", t.update!.releaseUrl);
+      }),
+    );
+  }
   right.appendChild(
     switchControl(t.enabled, async (next) => {
       await ipcRenderer.invoke("codexpp:set-tweak-enabled", m.id, next);
@@ -934,6 +1177,20 @@ function openInPlaceButton(label: string, onClick: () => void): HTMLButtonElemen
     `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-2xs" aria-hidden="true">` +
     `<path d="M14.3349 13.3301V6.60645L5.47065 15.4707C5.21095 15.7304 4.78895 15.7304 4.52925 15.4707C4.26955 15.211 4.26955 14.789 4.52925 14.5293L13.3935 5.66504H6.66011C6.29284 5.66504 5.99507 5.36727 5.99507 5C5.99507 4.63273 6.29284 4.33496 6.66011 4.33496H14.9999L15.1337 4.34863C15.4369 4.41057 15.665 4.67857 15.665 5V13.3301C15.6649 13.6973 15.3672 13.9951 14.9999 13.9951C14.6327 13.9951 14.335 13.6973 14.3349 13.3301Z" fill="currentColor"></path>` +
     `</svg>`;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+function compactButton(label: string, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className =
+    "border-token-border user-select-none no-drag cursor-interaction inline-flex h-8 items-center whitespace-nowrap rounded-lg border px-2 text-sm text-token-text-primary enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
+  btn.textContent = label;
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();

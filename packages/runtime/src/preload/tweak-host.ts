@@ -28,6 +28,16 @@ interface ListedTweak {
   dir: string;
   entryExists: boolean;
   enabled: boolean;
+  update: {
+    checkedAt: string;
+    repo: string;
+    currentVersion: string;
+    latestVersion: string | null;
+    latestTag: string | null;
+    releaseUrl: string | null;
+    updateAvailable: boolean;
+    error?: string;
+  } | null;
 }
 
 interface UserPaths {

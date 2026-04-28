@@ -34,6 +34,16 @@
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Tweak update checks
+
+Tweak updates are deliberately advisory. `manifest.json` must include `githubRepo` in `owner/repo` form. The main process checks GitHub Releases at most once per day per tweak and caches the result in `<user-data-dir>/state.json`.
+
+The renderer only receives cached metadata (`latestVersion`, `releaseUrl`, `updateAvailable`) and can open the GitHub release for review. There is no automatic download, install, or replacement path in the runtime.
+
+## Default tweaks
+
+The installer seeds the default tweak set from external GitHub release tarballs instead of carrying their source in this repository. Existing local tweak folders are never overwritten. Pass `--no-default-tweaks` for a clean install with only the Codex++ runtime.
+
 ## Boot sequence
 
 1. User launches Codex.app.
@@ -92,9 +102,17 @@ When Codex auto-updates via Sparkle:
 
 1. Sparkle downloads a new Codex.app and replaces ours on disk.
 2. Our patch is gone; the new app launches normally.
-3. Our launchd / systemd / scheduled-task watcher fires (it watches `app.asar` for changes).
-4. The watcher runs `codex-plusplus doctor`, which detects the asar hash matches `originalAsarHash` of the *previous* version (i.e., it's no longer patched) and exits non-zero.
-5. (Future) `doctor` surfaces a desktop notification linking the user to `codex-plusplus repair`. Right now you re-run it manually.
+3. Our launchd / systemd / scheduled-task watcher fires (macOS and Linux watch `app.asar`; Windows runs at logon).
+4. The watcher runs `codex-plusplus repair --quiet`.
+5. `repair` is idempotent: if the current asar hash still matches `patchedAsarHash`, it exits without touching the app; if the hash drifted after an update, it re-runs the install patch against the new app bundle.
+
+## Codex++ self-updates
+
+The watcher also runs daily using the GitHub-installed local CLI at `~/.codex-plusplus/source/packages/installer/dist/cli.js`. When the app patch is intact but the installed Codex++ version in `state.json` is older than the running CLI, `repair` refreshes `<user-data-dir>/runtime/` and updates state. It does not modify user tweak folders.
+
+Users can disable Codex++ runtime auto-updates from Settings → Codex Plus Plus → Config. The setting is stored in `<user-data-dir>/config.json`; app-update repair still works, but intact-app runtime refreshes are skipped while auto-update is disabled.
+
+The Config page can also check for Codex++ updates manually. It reads GitHub release metadata and opens GitHub release pages for review.
 
 ## What's not protected against
 

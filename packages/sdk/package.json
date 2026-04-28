@@ -1,11 +1,13 @@
 {
   "name": "@codex-plusplus/sdk",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Public types and helpers for codex-plusplus tweak authors",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },

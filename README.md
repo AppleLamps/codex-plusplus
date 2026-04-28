@@ -13,7 +13,7 @@ Everything beyond the one-time install patch lives **outside** the app bundle, s
 ## Install
 
 ```sh
-npx codex-plusplus install
+curl -fsSL https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.sh | bash
 ```
 
 That's it. The installer:
@@ -24,15 +24,23 @@ That's it. The installer:
 4. Recomputes the asar header SHA-256 and writes it into `Info.plist` (`ElectronAsarIntegrity`).
 5. Flips `EnableEmbeddedAsarIntegrityValidation` in the Electron Framework binary as a belt-and-suspenders.
 6. Re-signs the app ad-hoc on macOS (`codesign --force --deep --sign -`).
-7. Installs a launch agent / login item that detects Sparkle auto-updates and prompts to repair.
+7. Installs a launch agent / login item that detects app updates and re-runs `repair --quiet`.
+8. Installs the default tweak set from their latest GitHub releases unless `--no-default-tweaks` is passed.
+
+The watcher also runs daily through the GitHub-installed local CLI. If Codex is already patched but a newer Codex++ CLI/runtime has been installed, `repair` refreshes the runtime in your user directory without replacing tweak code. You can turn this off from Settings → Codex Plus Plus → Config.
 
 To revert:
 
 ```sh
-npx codex-plusplus uninstall
+node ~/.codex-plusplus/source/packages/installer/dist/cli.js uninstall
 ```
 
 Other commands: `status`, `doctor`, `repair`, `tweaks list`, `tweaks open` (opens user tweaks dir).
+
+Default tweaks currently installed on first run:
+
+- `co.bennett.custom-keyboard-shortcuts` from `b-nnett/codex-plusplus-keyboard-shortcuts`
+- `co.bennett.ui-improvements` from `b-nnett/codex-plusplus-bennett-ui`
 
 ## Writing a tweak
 
@@ -49,6 +57,7 @@ my-tweak/
   "id": "com.you.my-tweak",
   "name": "My Tweak",
   "version": "0.1.0",
+  "githubRepo": "you/my-tweak",
   "author": "you",
   "description": "Adds a button.",
   "minRuntime": "0.1.0"
@@ -75,6 +84,14 @@ export default {
 
 See [`docs/WRITING-TWEAKS.md`](./docs/WRITING-TWEAKS.md) for the full API.
 
+## Tweak updates
+
+Every tweak manifest must include `githubRepo` in `owner/repo` form. Codex++ checks GitHub Releases for each installed tweak at most once per day and shows **Update Available** in Settings → Tweaks when a newer semver release exists.
+
+Codex++ does **not** auto-update tweaks. The manager links to the GitHub release so users can review the diff, release notes, and repository before manually replacing local tweak files.
+
+See [`SECURITY.md`](./SECURITY.md) for the security model and reporting policy.
+
 ## How it works (TL;DR)
 
 | Thing | Location |
@@ -95,7 +112,7 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for details.
 
 ## Legal
 
-This is an unofficial project. Not affiliated with OpenAI. Modifying Codex.app violates its code signature; on macOS you may need to allow the re-signed app on first launch. Auto-updates from Sparkle will overwrite the patch — `codex-plusplus` includes a watcher that detects this and prompts to repair.
+This is an unofficial project. Not affiliated with OpenAI. Modifying Codex.app violates its code signature; on macOS you may need to allow the re-signed app on first launch. Auto-updates from Sparkle overwrite the patch, so `codex-plusplus` installs a watcher that re-applies it.
 
 Use at your own risk.
 

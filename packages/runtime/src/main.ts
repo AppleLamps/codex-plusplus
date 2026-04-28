@@ -7,7 +7,7 @@
  * We are in CJS land here (matches Electron's main process and Codex's own
  * code). The renderer-side runtime is bundled separately into preload.js.
  */
-import { app, BrowserWindow, ipcMain, session, shell, webContents } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, session, shell, webContents } from "electron";
 import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import chokidar from "chokidar";
@@ -27,7 +27,9 @@ const PRELOAD_PATH = resolve(runtimeDir, "preload.js");
 const TWEAKS_DIR = join(userRoot, "tweaks");
 const LOG_DIR = join(userRoot, "log");
 const LOG_FILE = join(LOG_DIR, "main.log");
-const STATE_FILE = join(userRoot, "state.json");
+const CONFIG_FILE = join(userRoot, "config.json");
+const CODEX_PLUSPLUS_VERSION = "0.1.0";
+const CODEX_PLUSPLUS_REPO = "b-nnett/codex-plusplus";
 
 mkdirSync(LOG_DIR, { recursive: true });
 mkdirSync(TWEAKS_DIR, { recursive: true });
@@ -49,23 +51,59 @@ if (process.env.CODEXPP_REMOTE_DEBUG === "1") {
 }
 
 interface PersistedState {
+  codexPlusPlus?: {
+    autoUpdate?: boolean;
+    updateCheck?: CodexPlusPlusUpdateCheck;
+  };
   /** Per-tweak enable flags. Missing entries default to enabled. */
   tweaks?: Record<string, { enabled?: boolean }>;
+  /** Cached GitHub release checks. Runtime never auto-installs updates. */
+  tweakUpdateChecks?: Record<string, TweakUpdateCheck>;
+}
+
+interface CodexPlusPlusUpdateCheck {
+  checkedAt: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseUrl: string | null;
+  releaseNotes: string | null;
+  updateAvailable: boolean;
+  error?: string;
+}
+
+interface TweakUpdateCheck {
+  checkedAt: string;
+  repo: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  latestTag: string | null;
+  releaseUrl: string | null;
+  updateAvailable: boolean;
+  error?: string;
 }
 
 function readState(): PersistedState {
   try {
-    return JSON.parse(readFileSync(STATE_FILE, "utf8")) as PersistedState;
+    return JSON.parse(readFileSync(CONFIG_FILE, "utf8")) as PersistedState;
   } catch {
     return {};
   }
 }
 function writeState(s: PersistedState): void {
   try {
-    writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
+    writeFileSync(CONFIG_FILE, JSON.stringify(s, null, 2));
   } catch (e) {
     log("warn", "writeState failed:", String((e as Error).message));
   }
+}
+function isCodexPlusPlusAutoUpdateEnabled(): boolean {
+  return readState().codexPlusPlus?.autoUpdate !== false;
+}
+function setCodexPlusPlusAutoUpdate(enabled: boolean): void {
+  const s = readState();
+  s.codexPlusPlus ??= {};
+  s.codexPlusPlus.autoUpdate = enabled;
+  writeState(s);
 }
 function isTweakEnabled(id: string): boolean {
   const s = readState();
@@ -187,13 +225,16 @@ app.on("will-quit", () => {
 });
 
 // 3. IPC: expose tweak metadata + reveal-in-finder.
-ipcMain.handle("codexpp:list-tweaks", () => {
+ipcMain.handle("codexpp:list-tweaks", async () => {
+  await Promise.all(tweakState.discovered.map((t) => ensureTweakUpdateCheck(t)));
+  const updateChecks = readState().tweakUpdateChecks ?? {};
   return tweakState.discovered.map((t) => ({
     manifest: t.manifest,
     entry: t.entry,
     dir: t.dir,
     entryExists: existsSync(t.entry),
     enabled: isTweakEnabled(t.manifest.id),
+    update: updateChecks[t.manifest.id] ?? null,
   }));
 });
 
@@ -204,6 +245,24 @@ ipcMain.handle("codexpp:set-tweak-enabled", (_e, id: string, enabled: boolean) =
   // Broadcast so renderer hosts re-evaluate which tweaks should be running.
   broadcastReload();
   return true;
+});
+
+ipcMain.handle("codexpp:get-config", () => {
+  const s = readState();
+  return {
+    version: CODEX_PLUSPLUS_VERSION,
+    autoUpdate: s.codexPlusPlus?.autoUpdate !== false,
+    updateCheck: s.codexPlusPlus?.updateCheck ?? null,
+  };
+});
+
+ipcMain.handle("codexpp:set-auto-update", (_e, enabled: boolean) => {
+  setCodexPlusPlusAutoUpdate(!!enabled);
+  return { autoUpdate: isCodexPlusPlusAutoUpdateEnabled() };
+});
+
+ipcMain.handle("codexpp:check-codexpp-update", async (_e, force?: boolean) => {
+  return ensureCodexPlusPlusUpdateCheck(force === true);
 });
 
 // Sandboxed renderer preload can't use Node fs to read tweak source. Main
@@ -298,6 +357,19 @@ ipcMain.handle("codexpp:user-paths", () => ({
 
 ipcMain.handle("codexpp:reveal", (_e, p: string) => {
   shell.openPath(p).catch(() => {});
+});
+
+ipcMain.handle("codexpp:open-external", (_e, url: string) => {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
+    throw new Error("only github.com links can be opened from tweak metadata");
+  }
+  shell.openExternal(parsed.toString()).catch(() => {});
+});
+
+ipcMain.handle("codexpp:copy-text", (_e, text: string) => {
+  clipboard.writeText(String(text));
+  return true;
 });
 
 // Manual force-reload trigger from the renderer (e.g. the "Force Reload"
@@ -414,6 +486,128 @@ function clearTweakModuleCache(): void {
   for (const key of Object.keys(require.cache)) {
     if (key.startsWith(prefix)) delete require.cache[key];
   }
+}
+
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/;
+
+async function ensureCodexPlusPlusUpdateCheck(force = false): Promise<CodexPlusPlusUpdateCheck> {
+  const state = readState();
+  const cached = state.codexPlusPlus?.updateCheck;
+  if (
+    !force &&
+    cached &&
+    cached.currentVersion === CODEX_PLUSPLUS_VERSION &&
+    Date.now() - Date.parse(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS
+  ) {
+    return cached;
+  }
+
+  const release = await fetchLatestRelease(CODEX_PLUSPLUS_REPO, CODEX_PLUSPLUS_VERSION);
+  const latestVersion = release.latestTag ? normalizeVersion(release.latestTag) : null;
+  const check: CodexPlusPlusUpdateCheck = {
+    checkedAt: new Date().toISOString(),
+    currentVersion: CODEX_PLUSPLUS_VERSION,
+    latestVersion,
+    releaseUrl: release.releaseUrl ?? `https://github.com/${CODEX_PLUSPLUS_REPO}/releases`,
+    releaseNotes: release.releaseNotes,
+    updateAvailable: latestVersion
+      ? compareVersions(normalizeVersion(latestVersion), CODEX_PLUSPLUS_VERSION) > 0
+      : false,
+    ...(release.error ? { error: release.error } : {}),
+  };
+  state.codexPlusPlus ??= {};
+  state.codexPlusPlus.updateCheck = check;
+  writeState(state);
+  return check;
+}
+
+async function ensureTweakUpdateCheck(t: DiscoveredTweak): Promise<void> {
+  const id = t.manifest.id;
+  const repo = t.manifest.githubRepo;
+  const state = readState();
+  const cached = state.tweakUpdateChecks?.[id];
+  if (
+    cached &&
+    cached.repo === repo &&
+    cached.currentVersion === t.manifest.version &&
+    Date.now() - Date.parse(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  const next = await fetchLatestRelease(repo, t.manifest.version);
+  const latestVersion = next.latestTag ? normalizeVersion(next.latestTag) : null;
+  const check: TweakUpdateCheck = {
+    checkedAt: new Date().toISOString(),
+    repo,
+    currentVersion: t.manifest.version,
+    latestVersion,
+    latestTag: next.latestTag,
+    releaseUrl: next.releaseUrl,
+    updateAvailable: latestVersion
+      ? compareVersions(latestVersion, normalizeVersion(t.manifest.version)) > 0
+      : false,
+    ...(next.error ? { error: next.error } : {}),
+  };
+  state.tweakUpdateChecks ??= {};
+  state.tweakUpdateChecks[id] = check;
+  writeState(state);
+}
+
+async function fetchLatestRelease(
+  repo: string,
+  currentVersion: string,
+): Promise<{ latestTag: string | null; releaseUrl: string | null; releaseNotes: string | null; error?: string }> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "User-Agent": `codex-plusplus/${currentVersion}`,
+        },
+        signal: controller.signal,
+      });
+      if (res.status === 404) {
+        return { latestTag: null, releaseUrl: null, releaseNotes: null, error: "no GitHub release found" };
+      }
+      if (!res.ok) {
+        return { latestTag: null, releaseUrl: null, releaseNotes: null, error: `GitHub returned ${res.status}` };
+      }
+      const body = await res.json() as { tag_name?: string; html_url?: string; body?: string };
+      return {
+        latestTag: body.tag_name ?? null,
+        releaseUrl: body.html_url ?? `https://github.com/${repo}/releases`,
+        releaseNotes: body.body ?? null,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (e) {
+    return {
+      latestTag: null,
+      releaseUrl: null,
+      releaseNotes: null,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+function normalizeVersion(v: string): string {
+  return v.trim().replace(/^v/i, "");
+}
+
+function compareVersions(a: string, b: string): number {
+  const av = VERSION_RE.exec(a);
+  const bv = VERSION_RE.exec(b);
+  if (!av || !bv) return 0;
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(av[i]) - Number(bv[i]);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 function broadcastReload(): void {

@@ -6,6 +6,7 @@ import { uninstall } from "./commands/uninstall.js";
 import { repair } from "./commands/repair.js";
 import { status } from "./commands/status.js";
 import { doctor } from "./commands/doctor.js";
+import { CODEX_PLUSPLUS_VERSION } from "./version.js";
 
 function wrap<T extends (...args: never[]) => unknown | Promise<unknown>>(fn: T): T {
   return ((...args: Parameters<T>) => {
@@ -21,7 +22,7 @@ function wrap<T extends (...args: never[]) => unknown | Promise<unknown>>(fn: T)
 }
 
 const prog = sade("codex-plusplus")
-  .version("0.0.1")
+  .version(CODEX_PLUSPLUS_VERSION)
   .describe("Tweak system for the Codex desktop app");
 
 prog
@@ -31,6 +32,7 @@ prog
   .option("--no-fuse", "Skip Electron fuse flip (only patch asar+plist)")
   .option("--no-resign", "Skip ad-hoc code signing on macOS")
   .option("--no-watcher", "Skip installing the auto-repair watcher")
+  .option("--no-default-tweaks", "Skip installing the default bundled tweak set")
   .action(wrap(install));
 
 prog
@@ -43,6 +45,8 @@ prog
   .command("repair")
   .describe("Re-apply the patch (use after a Sparkle auto-update)")
   .option("--app", "Path to Codex.app / install dir")
+  .option("--quiet", "Suppress non-error output")
+  .option("--force", "Re-apply even if the patch appears intact")
   .action(wrap(repair));
 
 prog

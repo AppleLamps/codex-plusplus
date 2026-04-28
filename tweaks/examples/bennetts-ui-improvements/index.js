@@ -13,8 +13,8 @@
  *                          the upgrade pill was. Click toggles between
  *                          5h and Weekly; hover replaces content with
  *                          "Resets: HH:MM". Red when <15% remaining.
- *                          Sources data from the expanded rate-limits
- *                          breakdown opened from the account menu.
+ *                          Sources data from Codex's authenticated
+ *                          /wham/usage app-server endpoint.
  *  • square-sidebar        Flatten the rounded seam between sidebar and
  *                          main content panel.
  *  • match-sidebar-width   Force the settings page sidebar to match the
@@ -22,12 +22,14 @@
  *                          layout jump when opening/closing Settings.
  *  • sidebar-action-grid   Render the four main sidebar actions as a 2x2
  *                          grid of filled buttons.
- *  • sidebar-render-monitor  Log sidebar mutation/commit activity for
- *                            diagnosing excessive re-renders.
+ *  • sidebar-project-backgrounds  Add subtle grouped backgrounds behind
+ *                                 project rows in the main sidebar.
+ *  • show-message-metrics-on-hover  Shows Codex token metrics beside
+ *                                   assistant messages on hover.
  *
  * Authoring notes
  * ---------------
- *  • Renderer-only; no Node deps.
+ *  • Renderer + main; main reads local Codex session JSONL for metrics.
  *  • Each feature returns a `dispose()` so toggling off is clean.
  *  • Match-by-text-content for resilience: Codex's main shell has no
  *    stable testids/aria-labels for these widgets.
@@ -36,16 +38,23 @@
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
   start(api) {
+    if (api.process === "main") {
+      startMainMetricsProvider(api);
+      startMainUsageProvider(api);
+      return;
+    }
+
     const state = {
       api,
       features: new Map(/* id -> { dispose } */),
       defaults: {
         "hide-upgrade-prompts": true,
         "show-usage-in-sidebar": false,
+        "show-message-metrics-on-hover": true,
         "square-sidebar": false,
         "match-sidebar-width": true,
         "sidebar-action-grid": true,
-        "sidebar-render-monitor": false,
+        "sidebar-project-backgrounds": true,
       },
     };
     this._state = state;
@@ -118,6 +127,12 @@ function renderSettings(root, state) {
         "Render 5-hour and weekly rate limits where the upgrade button was. Open the rate-limits breakdown (account menu → Rate limits) at least once to seed the values.",
     },
     {
+      id: "show-message-metrics-on-hover",
+      title: "Show message metrics on hover",
+      description:
+        "Show per-turn token usage beside assistant messages.",
+    },
+    {
       id: "square-sidebar",
       title: "Square sidebar corners",
       description:
@@ -136,10 +151,10 @@ function renderSettings(root, state) {
         "Render New chat, Search, Plugins, and Automations as a compact 2x2 grid of filled buttons.",
     },
     {
-      id: "sidebar-render-monitor",
-      title: "Sidebar render monitor",
+      id: "sidebar-project-backgrounds",
+      title: "Sidebar project backgrounds",
       description:
-        "Log sidebar DOM mutation bursts and React commit counts to preload.log while diagnosing sidebar re-renders.",
+        "Add subtle grouped backgrounds behind project rows so adjacent projects are easier to scan.",
     },
   ];
 
@@ -366,23 +381,17 @@ const FEATURES = {
   },
 
   /**
-   * Surface 5h + Weekly rate limits as two boxes in the sidebar slot where
-   * the "Upgrade" pill lives. Sources its data from Codex's own rate-limits
-   * popover (the Radix `[role="menu"]` opened from the model picker).
+   * Surface 5h + Weekly rate limits in the sidebar slot where the "Upgrade"
+   * pill lives. Sources its data from Codex's authenticated app-server usage
+   * endpoint, with Codex's rendered rate-limit UI as a fallback.
    *
    * Strategy
    * --------
-   *  1. Watch document for a `[role="menu"]` whose menuitems mention "5h"
-   *     and "weekly" — that's the popover.
-   *  2. Parse each menuitem's text for a label + percentage / time-left,
-   *     storing the latest snapshot to disk (so we can render even when the
-   *     popover is closed).
-   *  3. Mount two boxes into the sidebar above the (now hidden) Upgrade
-   *     pill. Re-mount on sidebar mutations.
-   *
-   * The popover only updates when opened, so the sidebar boxes show the
-   * most-recently-seen values. We log every parse + render so it's easy
-   * to debug formats we haven't seen yet.
+   *  1. Fetch `/wham/usage` through Codex's existing renderer fetch bridge.
+   *  2. Parse the expanded/compact rendered labels only when the bridge is
+   *     unavailable or the request fails.
+   *  3. Persist the latest snapshot and refresh the mounted sidebar box in
+   *     place. Re-mount only when Codex replaces the sidebar subtree.
    */
   "show-usage-in-sidebar"(api) {
     /**
@@ -395,10 +404,383 @@ const FEATURES = {
      */
     let snapshot = readSnapshot(api);
     let mounted = null; // HTMLElement currently rendered in the sidebar
+    let directUsageAvailable = false;
+    let directUsageInFlight = false;
+    let directUsageLastAttemptAt = 0;
+    let directUsageFailureLogged = false;
+    let directUsageSuccessLogged = false;
+    let usageBridgeReadyLogged = false;
+    let usageBridgeScriptInjected = false;
+    let bridgeRequestSeq = 0;
 
     const log = (...a) => api.log.info("[usage]", ...a);
 
     // ── parsing ────────────────────────────────────────────────────────
+    const isVisibleElement = (node) => {
+      if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+      if (node.closest("[hidden], [inert], [aria-hidden='true']")) return false;
+      const style = window.getComputedStyle(node);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0"
+      ) {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const applySnapshot = (partial, source) => {
+      if (!partial?.fiveHour && !partial?.weekly) return false;
+      const next = {
+        fiveHour: partial.fiveHour || snapshot?.fiveHour || null,
+        weekly: partial.weekly || snapshot?.weekly || null,
+        at: Date.now(),
+      };
+      const changed =
+        JSON.stringify(next.fiveHour) !== JSON.stringify(snapshot?.fiveHour) ||
+        JSON.stringify(next.weekly) !== JSON.stringify(snapshot?.weekly);
+      snapshot = next;
+      writeSnapshot(api, snapshot);
+      if (changed) {
+        log(`parsed snapshot from ${source}`, snapshot);
+        ensureMounted();
+      }
+      return changed;
+    };
+
+    const ensureUsageBridgeScript = () => {
+      if (usageBridgeScriptInjected) return;
+      usageBridgeScriptInjected = true;
+      window.addEventListener(
+        "codexpp-usage-bridge-ready",
+        (event) => {
+          if (usageBridgeReadyLogged) return;
+          usageBridgeReadyLogged = true;
+          api.log.info("[usage] bridge ready", event.detail);
+        },
+        { once: true },
+      );
+      const script = document.createElement("script");
+      script.dataset.codexppUsageBridge = "true";
+      script.textContent = `(() => {
+        if (window.__codexppUsageBridgeInstalled) return;
+        window.__codexppUsageBridgeInstalled = true;
+        const pending = new Set();
+        window.dispatchEvent(new CustomEvent("codexpp-usage-bridge-ready", {
+          detail: {
+            hasElectronBridge: typeof window.electronBridge?.sendMessageFromView === "function",
+          },
+        }));
+        window.addEventListener("codexpp-usage-request", (event) => {
+          const message = event.detail;
+          if (!message || typeof message !== "object" || !message.requestId) return;
+          pending.add(message.requestId);
+          let forwarded = false;
+          const bridge = window.electronBridge;
+          if (typeof bridge?.sendMessageFromView === "function") {
+            forwarded = true;
+            bridge.sendMessageFromView(message).catch(() => {});
+          }
+          const forwardedEvent = new CustomEvent("codex-message-from-view", {
+            detail: message,
+          });
+          if (forwarded) forwardedEvent.__codexForwardedViaBridge = true;
+          window.dispatchEvent(forwardedEvent);
+        });
+        window.addEventListener("message", (event) => {
+          const data = event.data;
+          if (
+            !data ||
+            typeof data !== "object" ||
+            data.type !== "fetch-response" ||
+            !pending.has(data.requestId)
+          ) {
+            return;
+          }
+          pending.delete(data.requestId);
+          window.dispatchEvent(new CustomEvent("codexpp-usage-response", {
+            detail: data,
+          }));
+          window.postMessage({
+            type: "codexpp-usage-response",
+            detail: data,
+          }, "*");
+        });
+      })();`;
+      (document.head || document.documentElement).appendChild(script);
+      script.remove();
+    };
+
+    const dispatchCodexViewMessage = (message) => {
+      ensureUsageBridgeScript();
+      window.dispatchEvent(
+        new CustomEvent("codexpp-usage-request", { detail: message }),
+      );
+
+      let forwarded = false;
+      const bridge = window.electronBridge;
+      if (typeof bridge?.sendMessageFromView === "function") {
+        forwarded = true;
+        bridge.sendMessageFromView(message).catch((e) => {
+          if (!directUsageFailureLogged) {
+            directUsageFailureLogged = true;
+            api.log.warn("[usage] bridge send failed", e);
+          }
+        });
+      }
+      const event = new CustomEvent("codex-message-from-view", {
+        detail: message,
+      });
+      if (forwarded) event.__codexForwardedViaBridge = true;
+      window.dispatchEvent(event);
+    };
+
+    const fetchCodexAppServerJson = async (url, timeoutMs = 10_000) => {
+      try {
+        return await api.ipc.invoke("usage-fetch", url);
+      } catch {
+        // Older runtimes or a failed main-webview probe fall through to the
+        // renderer bridge attempt below.
+      }
+
+      const hostId =
+        new URL(window.location.href).searchParams.get("hostId")?.trim() ||
+        "local";
+      const requestId = `codexpp-usage-${Date.now()}-${++bridgeRequestSeq}`;
+
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const cleanup = () => {
+          done = true;
+          window.removeEventListener("message", onMessage);
+          window.removeEventListener("codexpp-usage-response", onBridgeResponse);
+          window.clearTimeout(timer);
+        };
+        const finish = (fn, value) => {
+          if (done) return;
+          cleanup();
+          fn(value);
+        };
+        const onMessage = (event) => {
+          const data =
+            event.data?.type === "codexpp-usage-response"
+              ? event.data.detail
+              : event.data;
+          handleResponse(data);
+        };
+        const onBridgeResponse = (event) => {
+          handleResponse(event.detail);
+        };
+        const handleResponse = (data) => {
+          if (
+            !data ||
+            typeof data !== "object" ||
+            data.type !== "fetch-response" ||
+            data.requestId !== requestId
+          ) {
+            return;
+          }
+          if (data.responseType === "success") {
+            try {
+              const body = JSON.parse(data.bodyJsonString);
+              if (data.status >= 200 && data.status < 300) {
+                finish(resolve, body);
+              } else {
+                finish(reject, new Error(`HTTP ${data.status}`));
+              }
+            } catch (e) {
+              finish(reject, e);
+            }
+          } else {
+            finish(reject, new Error(data.error || "fetch failed"));
+          }
+        };
+        const timer = window.setTimeout(() => {
+          dispatchCodexViewMessage({ type: "cancel-fetch", requestId });
+          finish(reject, new Error("usage request timed out"));
+        }, timeoutMs);
+        window.addEventListener("message", onMessage);
+        window.addEventListener("codexpp-usage-response", onBridgeResponse);
+        dispatchCodexViewMessage({
+          type: "fetch",
+          hostId,
+          requestId,
+          method: "GET",
+          url,
+        });
+      });
+    };
+
+    const remainingPercent = (usedPercent) => {
+      const used = Number(usedPercent);
+      if (!Number.isFinite(used)) return null;
+      return Math.round(Math.min(Math.max(100 - used, 0), 100));
+    };
+
+    const formatResetAt = (epochSeconds) => {
+      const seconds = Number(epochSeconds);
+      if (!Number.isFinite(seconds)) return null;
+      const date = new Date(seconds * 1000);
+      if (!Number.isFinite(date.getTime())) return null;
+      return date.toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+    };
+
+    const normalizeUsageWindow = (window, label) => {
+      if (!window || typeof window !== "object") return null;
+      const pct = remainingPercent(window.used_percent);
+      if (pct == null) return null;
+      return {
+        label,
+        pct,
+        resetAt: formatResetAt(window.reset_at),
+      };
+    };
+
+    const pickClosestWindow = (windows, targetMinutes, predicate) => {
+      let best = null;
+      let bestDistance = Infinity;
+      for (const window of windows) {
+        const minutes = Number(window?.limit_window_seconds) / 60;
+        if (!Number.isFinite(minutes) || !predicate(minutes)) continue;
+        const distance = Math.abs(minutes - targetMinutes);
+        if (
+          !best ||
+          distance < bestDistance ||
+          (distance === bestDistance &&
+            minutes > Number(best.limit_window_seconds) / 60)
+        ) {
+          best = window;
+          bestDistance = distance;
+        }
+      }
+      return best;
+    };
+
+    const snapshotFromUsageStatus = (status) => {
+      const limits = [];
+      const pushLimit = (rateLimit) => {
+        if (!rateLimit || typeof rateLimit !== "object") return;
+        if (rateLimit.primary_window) limits.push(rateLimit.primary_window);
+        if (rateLimit.secondary_window) limits.push(rateLimit.secondary_window);
+      };
+
+      pushLimit(status?.rate_limit);
+      if (Array.isArray(status?.additional_rate_limits)) {
+        for (const item of status.additional_rate_limits) {
+          pushLimit(item?.rate_limit);
+        }
+      }
+
+      const five = pickClosestWindow(
+        limits,
+        300,
+        (minutes) => minutes > 0 && minutes < 1440,
+      );
+      const weekly = pickClosestWindow(
+        limits,
+        7 * 24 * 60,
+        (minutes) => minutes >= 1440,
+      );
+
+      return {
+        fiveHour: normalizeUsageWindow(five, "5h"),
+        weekly: normalizeUsageWindow(weekly, "Weekly"),
+      };
+    };
+
+    const collectUsageWindows = (value, out = [], seen = new WeakSet()) => {
+      if (!value || typeof value !== "object") return out;
+      if (seen.has(value)) return out;
+      seen.add(value);
+      if (
+        "used_percent" in value &&
+        "limit_window_seconds" in value &&
+        "reset_at" in value
+      ) {
+        out.push(value);
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) collectUsageWindows(item, out, seen);
+      } else {
+        for (const item of Object.values(value)) {
+          collectUsageWindows(item, out, seen);
+        }
+      }
+      return out;
+    };
+
+    const snapshotFromUsageWindows = (windows) => {
+      const five = pickClosestWindow(
+        windows,
+        300,
+        (minutes) => minutes > 0 && minutes < 1440,
+      );
+      const weekly = pickClosestWindow(
+        windows,
+        7 * 24 * 60,
+        (minutes) => minutes >= 1440,
+      );
+      return {
+        fiveHour: normalizeUsageWindow(five, "5h"),
+        weekly: normalizeUsageWindow(weekly, "Weekly"),
+      };
+    };
+
+    const applyUsageEvent = (message) => {
+      if (!message || typeof message !== "object") return false;
+      const windows = collectUsageWindows(message);
+      if (!windows.length) return false;
+      const partial = snapshotFromUsageWindows(windows);
+      if (!partial.fiveHour && !partial.weekly) return false;
+      directUsageAvailable = true;
+      applySnapshot(partial, "rate-limit-event");
+      return true;
+    };
+
+    const onUsageMessage = (event) => {
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+      applyUsageEvent(data);
+    };
+
+    const refreshUsageFromApi = async () => {
+      if (directUsageInFlight) return false;
+      const now = Date.now();
+      if (directUsageLastAttemptAt && now - directUsageLastAttemptAt < 60_000) {
+        return false;
+      }
+      directUsageLastAttemptAt = now;
+      directUsageInFlight = true;
+      try {
+        const status = await fetchCodexAppServerJson("/wham/usage");
+        const partial = snapshotFromUsageStatus(status);
+        if (partial.fiveHour || partial.weekly) {
+          directUsageAvailable = true;
+          directUsageFailureLogged = false;
+          if (!directUsageSuccessLogged) {
+            directUsageSuccessLogged = true;
+            log("api active", partial);
+          }
+          applySnapshot(partial, "api");
+          return true;
+        }
+        return false;
+      } catch (e) {
+        if (!directUsageFailureLogged) {
+          directUsageFailureLogged = true;
+          api.log.warn("[usage] /wham/usage unavailable; falling back to DOM", e);
+        }
+        return false;
+      } finally {
+        directUsageInFlight = false;
+      }
+    };
+
     /**
      * Codex's expanded breakdown is a 2-column CSS grid: label in col-1,
      * value in col-2. We locate the grid by its unique class signature,
@@ -413,6 +795,7 @@ const FEATURES = {
         'div[class*="grid-cols-[minmax(0,1fr)_auto]"]',
       );
       for (const g of grids) {
+        if (!isVisibleElement(g)) continue;
         const txt = (g.textContent || "").toLowerCase();
         if (
           (txt.includes("5h") || txt.includes("hourly")) &&
@@ -427,18 +810,24 @@ const FEATURES = {
      * Parse a value span (e.g. "100%·16:19") into `{ pct, resetAt }`.
      * Falls back to `null` fields when a piece is missing.
      */
-    const parseValue = (span) => {
-      const txt = (span.textContent || "").replace(/\s+/g, " ").trim();
+    const parseValueText = (txt, root) => {
       const pctMatch = txt.match(/(\d{1,3})\s*%/);
       const pct = pctMatch ? Math.max(0, Math.min(100, +pctMatch[1])) : null;
       // Prefer the inner [title="HH:MM"] attribute, else regex the text.
-      const titled = span.querySelector("[title]");
+      const titled = root?.querySelector?.("[title]");
       let resetAt = titled ? titled.getAttribute("title") : null;
       if (!resetAt) {
-        const tMatch = txt.match(/\b(\d{1,2}:\d{2})\b/);
+        const tMatch =
+          txt.match(/\b(\d{1,2}:\d{2})\b/) ||
+          txt.match(/\b(\d+\s*(?:m|h|d))\b/i);
         resetAt = tMatch ? tMatch[1] : null;
       }
       return { pct, resetAt };
+    };
+
+    const parseValue = (span) => {
+      const txt = (span.textContent || "").replace(/\s+/g, " ").trim();
+      return parseValueText(txt, span);
     };
 
     const scanBreakdown = (grid) => {
@@ -459,19 +848,38 @@ const FEATURES = {
         }
       }
       if (!five && !week) return false;
-      const next = {
-        fiveHour: five || snapshot?.fiveHour || null,
-        weekly: week || snapshot?.weekly || null,
-        at: Date.now(),
-      };
-      const changed =
-        JSON.stringify(next.fiveHour) !== JSON.stringify(snapshot?.fiveHour) ||
-        JSON.stringify(next.weekly) !== JSON.stringify(snapshot?.weekly);
-      snapshot = next;
-      writeSnapshot(api, snapshot);
-      log("parsed snapshot", snapshot);
-      if (changed) ensureMounted(true);
+      applySnapshot({ fiveHour: five, weekly: week }, "breakdown");
       return true;
+    };
+
+    const parseCompactUsageNode = (node) => {
+      if (!(node instanceof HTMLElement)) return null;
+      if (node.closest('[data-codexpp="usage-box"]')) return null;
+      if (!isVisibleElement(node)) return null;
+      const text = (node.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 160 || !/%/.test(text)) return null;
+      const lower = text.toLowerCase();
+      const hasFive = /\b(5h|5\s*hour|hourly)\b/.test(lower);
+      const hasWeek = /\b(weekly|week)\b/.test(lower);
+      if (!hasFive && !hasWeek) return null;
+
+      const value = parseValueText(text, node);
+      if (value.pct == null) return null;
+      const label = hasFive && !hasWeek ? "5h" : hasWeek && !hasFive ? "Weekly" : null;
+      if (!label) return null;
+      return label === "5h"
+        ? { fiveHour: { label, ...value } }
+        : { weekly: { label, ...value } };
+    };
+
+    const scanCompactUsage = () => {
+      const candidates = document.querySelectorAll(
+        'button, [role="button"], [role="status"], [aria-label], [title], span',
+      );
+      for (const node of candidates) {
+        const partial = parseCompactUsageNode(node);
+        if (partial) applySnapshot(partial, "compact");
+      }
     };
 
     // ── sidebar mount ─────────────────────────────────────────────────
@@ -545,8 +953,12 @@ const FEATURES = {
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        const grid = findBreakdownGrid();
-        if (grid) scanBreakdown(grid);
+        refreshUsageFromApi();
+        if (!directUsageAvailable) {
+          const grid = findBreakdownGrid();
+          if (grid) scanBreakdown(grid);
+          scanCompactUsage();
+        }
         ensureMounted();
       });
     };
@@ -554,11 +966,19 @@ const FEATURES = {
     onMutate();
     const obs = new MutationObserver(onMutate);
     obs.observe(document.documentElement, { childList: true, subtree: true });
+    const interval = window.setInterval(onMutate, 15_000);
+    window.addEventListener("focus", onMutate);
+    window.addEventListener("message", onUsageMessage);
+    document.addEventListener("visibilitychange", onMutate);
 
     log("active", { snapshot });
 
     return () => {
       obs.disconnect();
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onMutate);
+      window.removeEventListener("message", onUsageMessage);
+      document.removeEventListener("visibilitychange", onMutate);
       if (mounted) {
         mounted.remove();
         mounted = null;
@@ -707,10 +1127,10 @@ const FEATURES = {
       "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 " +
       "focus-visible:outline-token-border cursor-interaction";
     const actions = [
-      { key: "new chat", label: "New chat" },
-      { key: "search", label: "Search" },
-      { key: "plugins", label: "Plugins" },
-      { key: "automations", label: "Automations" },
+      { key: "new chat", aliases: ["new chat"], label: "New chat" },
+      { key: "search", aliases: ["search"], label: "Search" },
+      { key: "plugins", aliases: ["plugin", "plugins"], label: "Plugins" },
+      { key: "automations", aliases: ["automation", "automations"], label: "Automations" },
     ];
 
     document.getElementById(STYLE_ID)?.remove();
@@ -782,9 +1202,11 @@ const FEATURES = {
           node.remove();
         }
       });
-      document.querySelectorAll(
-        `[${ATTR}="original"], [${ATTR}="source"], [${ATTR}="source-original"], [${ATTR}="overlay"]`,
-      ).forEach((node) => {
+      document.querySelectorAll(`[${ATTR}]`).forEach((node) => {
+        if (node.dataset.codexppSidebarActionOwned === "true") {
+          node.remove();
+          return;
+        }
         node.removeAttribute(ATTR);
         if (node.dataset.codexppSidebarActionPrevClass !== undefined) {
           node.className = node.dataset.codexppSidebarActionPrevClass;
@@ -830,7 +1252,7 @@ const FEATURES = {
       const text = normalize(node.textContent || "");
       let count = 0;
       for (const action of actions) {
-        if (text.includes(action.key)) count += 1;
+        if (action.aliases.some((alias) => text.includes(alias))) count += 1;
       }
       return count > 1;
     };
@@ -846,20 +1268,35 @@ const FEATURES = {
     const findActionButtons = (options = {}) => {
       const sidebar = findMainSidebar();
       if (!sidebar) return null;
+      const sidebarRect = sidebar.getBoundingClientRect();
       const candidates = Array.from(sidebar.querySelectorAll("button, a"))
         .filter(
-          (node) =>
-            node instanceof HTMLElement &&
-            node.getAttribute(ATTR) !== "original" &&
-            node.getAttribute(ATTR) !== "source-original" &&
-            node.getAttribute(ATTR) !== "overlay" &&
-            !isCompositeActionText(node),
-        );
+          (node) => {
+            if (!(node instanceof HTMLElement)) return false;
+            if (
+              node.getAttribute(ATTR) === "original" ||
+              node.getAttribute(ATTR) === "source-original" ||
+              node.getAttribute(ATTR) === "overlay" ||
+              isCompositeActionText(node)
+            ) {
+              return false;
+            }
+            const rect = node.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            return rect.top - sidebarRect.top < 260;
+          },
+        )
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.top - br.top || ar.left - br.left;
+        });
       const byLabel = new Map();
       for (const node of candidates) {
         const label = buttonLabel(node);
-        if (actions.some((action) => action.key === label) && !byLabel.has(label)) {
-          byLabel.set(label, node);
+        const action = actions.find((item) => item.aliases.includes(label));
+        if (action && !byLabel.has(action.key)) {
+          byLabel.set(action.key, node);
         }
       }
       if (actions.some((action) => !byLabel.has(action.key))) return null;
@@ -1041,17 +1478,29 @@ const FEATURES = {
     };
 
     const apply = () => {
-      clearStaleNodes();
-
       const sidebar = findMainSidebar();
       if (!sidebar) return;
 
       const actionButtons = findActionButtons();
-      if (!actionButtons) return;
+      if (!actionButtons) {
+        cleanupMarks();
+        return;
+      }
       const originals = actionButtons.map((action) => action.original);
 
       const group = commonAncestor(originals);
       if (!(group instanceof HTMLElement)) return;
+      const groupText = normalize(group.textContent || "");
+      const groupRect = group.getBoundingClientRect();
+      const sidebarRect = sidebar.getBoundingClientRect();
+      if (
+        group.children.length > 8 ||
+        groupRect.top - sidebarRect.top > 260 ||
+        /\bpinned\b|\bprojects?\b/.test(groupText)
+      ) {
+        cleanupMarks();
+        return;
+      }
 
       markNode(group, "group");
       addClasses(group, WRAPPER_CLASS.split(/\s+/).filter(Boolean));
@@ -1088,14 +1537,14 @@ const FEATURES = {
     const scheduleApply = () => {
       if (scheduled) return;
       scheduled = true;
-      requestAnimationFrame(() => {
+      window.setTimeout(() => {
         scheduled = false;
         apply();
-      });
+      }, 0);
     };
 
     clearStaleNodes();
-    scheduleApply();
+    apply();
     const obs = new MutationObserver(scheduleApply);
     obs.observe(document.body, { childList: true, subtree: true });
 
@@ -1110,150 +1559,1144 @@ const FEATURES = {
   },
 
   /**
-   * Lightweight sidebar render monitor.
+   * Add subtle grouped backgrounds behind project rows in the main sidebar.
    *
-   * CDP is ideal for full timeline captures, but Codex does not expose a
-   * remote-debugging endpoint by default. This in-renderer monitor gives us
-   * a scoped signal: DOM mutation bursts in the sidebar plus app-level React
-   * commit counts while the sidebar is mounted.
+   * Codex's sidebar project rows are `div[role="listitem"]` nodes with
+   * class `group/cwd` and an aria-label matching the child folder button.
+   * We mark that row directly, then color the folder icon/title and any
+   * unread indicator with the row's project theme.
+   *
+   * We only mark existing nodes and inject token-based CSS. No wrapping,
+   * no synthetic click targets, and cleanup restores the original DOM.
    */
-  "sidebar-render-monitor"(api) {
+  "sidebar-project-backgrounds"(api) {
+    const STYLE_ID = "codexpp-sidebar-project-backgrounds";
+    const ATTR = "data-codexpp-sidebar-project-backgrounds";
+    const MENU_ATTR = "data-codexpp-sidebar-project-color-menu";
+    const COLOR_STORAGE_KEY = "sidebar-project-backgrounds:colors";
     const ASIDE_SELECTOR =
       "aside.pointer-events-auto.relative.flex.overflow-hidden";
-    const FLUSH_MS = 2_000;
-    const log = (...args) => api.log.info("[sidebar-monitor]", ...args);
+    const EXCLUDED_LABELS = new Set([
+      "account",
+      "automations",
+      "get plus",
+      "help",
+      "new chat",
+      "add new project",
+      "collapse all",
+      "filter sidebar chats",
+      "performance boost",
+      "pinned",
+      "plugins",
+      "projects",
+      "rate limits",
+      "search",
+      "settings",
+      "subway surfers",
+      "ui improvements",
+      "upgrade",
+      "upgrade plan",
+    ]);
+    const PALETTE = [
+      {
+        id: "blue",
+        label: "Blue",
+        value: "var(--color-token-charts-blue, var(--color-token-text-link-foreground))",
+        textValue: "var(--codexpp-project-blue-text)",
+      },
+      {
+        id: "green",
+        label: "Green",
+        value: "var(--color-token-charts-green, var(--color-token-text-secondary))",
+        textValue: "var(--codexpp-project-green-text)",
+      },
+      {
+        id: "yellow",
+        label: "Yellow",
+        value: "var(--color-token-charts-yellow, var(--color-token-text-secondary))",
+        textValue: "var(--codexpp-project-yellow-text)",
+      },
+      {
+        id: "red",
+        label: "Red",
+        value: "var(--color-token-charts-red, var(--color-token-text-secondary))",
+        textValue: "var(--codexpp-project-red-text)",
+      },
+      {
+        id: "pink",
+        label: "Pink",
+        value: "var(--pink-400, var(--color-token-charts-purple, var(--color-token-text-link-foreground)))",
+        textValue: "var(--codexpp-project-pink-text)",
+      },
+      {
+        id: "purple",
+        label: "Purple",
+        value: "var(--color-token-charts-purple, var(--color-token-text-link-foreground))",
+        textValue: "var(--codexpp-project-purple-text)",
+      },
+      {
+        id: "gray",
+        label: "Gray",
+        value: "var(--color-token-text-secondary)",
+        textValue: "var(--codexpp-project-gray-text)",
+      },
+    ];
+    const colorPrefsCacheKey = "__codexppSidebarProjectColorPrefs";
+    let colorPrefs = readColorPrefs();
+    window[colorPrefsCacheKey] = colorPrefs;
+    const rowHandlers = new Map();
+    let pendingContextMenu = null;
+    let menu = null;
+    let disposed = false;
 
-    let sidebar = null;
-    let sidebarObserver = null;
-    let commitCount = 0;
-    let lastCommitCount = 0;
-    let flushTimer = null;
-    let scanScheduled = false;
-    let stats = freshStats();
+    document.getElementById(STYLE_ID)?.remove();
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      :root {
+        --codexpp-project-blue-text: var(--color-token-charts-blue, var(--color-token-text-link-foreground));
+        --codexpp-project-green-text: color-mix(in srgb, var(--color-token-charts-green, currentColor) 72%, black);
+        --codexpp-project-yellow-text: color-mix(in srgb, var(--color-token-charts-yellow, currentColor) 42%, black);
+        --codexpp-project-red-text: color-mix(in srgb, var(--color-token-charts-red, currentColor) 82%, black);
+        --codexpp-project-pink-text: color-mix(in srgb, var(--pink-400, var(--color-token-charts-purple, currentColor)) 68%, black);
+        --codexpp-project-purple-text: color-mix(in srgb, var(--color-token-charts-purple, currentColor) 82%, black);
+        --codexpp-project-gray-text: color-mix(in srgb, var(--color-token-text-primary, currentColor) 25%, black);
+      }
 
-    function freshStats() {
-      return {
-        mutations: 0,
-        childList: 0,
-        attributes: 0,
-        characterData: 0,
-        added: 0,
-        removed: 0,
-        classChanges: 0,
-        styleChanges: 0,
-        ariaChanges: 0,
-      };
-    }
+      .electron-dark {
+        --codexpp-project-blue-text: var(--color-token-text-link-foreground, var(--color-token-charts-blue));
+        --codexpp-project-green-text: var(--color-token-charts-green, var(--color-token-text-primary));
+        --codexpp-project-yellow-text: var(--color-token-charts-yellow, var(--color-token-text-primary));
+        --codexpp-project-red-text: color-mix(in srgb, var(--color-token-charts-red, currentColor) 86%, white);
+        --codexpp-project-pink-text: var(--pink-400, var(--color-token-charts-purple, var(--color-token-text-primary)));
+        --codexpp-project-purple-text: color-mix(in srgb, var(--color-token-charts-purple, currentColor) 88%, white);
+        --codexpp-project-gray-text: var(--color-token-text-secondary);
+      }
 
-    function findSidebar() {
-      const node = document.querySelector(ASIDE_SELECTOR);
-      return node instanceof HTMLElement ? node : null;
-    }
+      [${ATTR}="row"] {
+        position: relative !important;
+        border-radius: var(--radius-md, 0.375rem) !important;
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-tint, var(--color-token-text-secondary)) 7%,
+          transparent
+        ) !important;
+        box-shadow:
+          inset 0 0 0 1px color-mix(
+            in srgb,
+            var(--codexpp-project-text-color, var(--codexpp-project-tint, var(--color-token-text-secondary))) 30%,
+            transparent
+          ) !important;
+      }
 
-    function attachSidebar(next) {
-      if (sidebar === next) return;
-      sidebarObserver?.disconnect();
-      sidebarObserver = null;
-      sidebar = next;
-      if (!sidebar) return;
+      .electron-dark [${ATTR}="row"] {
+        box-shadow:
+          inset 0 0 0 1px color-mix(
+            in srgb,
+            var(--codexpp-project-text-color, var(--codexpp-project-tint, var(--color-token-text-secondary))) 22%,
+            transparent
+          ) !important;
+      }
 
-      sidebarObserver = new MutationObserver((records) => {
-        for (const record of records) {
-          stats.mutations += 1;
-          if (record.type === "childList") {
-            stats.childList += 1;
-            stats.added += record.addedNodes.length;
-            stats.removed += record.removedNodes.length;
-          } else if (record.type === "attributes") {
-            stats.attributes += 1;
-            if (record.attributeName === "class") stats.classChanges += 1;
-            else if (record.attributeName === "style") stats.styleChanges += 1;
-            else if (record.attributeName?.startsWith("aria-")) {
-              stats.ariaChanges += 1;
-            }
-          } else if (record.type === "characterData") {
-            stats.characterData += 1;
-          }
+      [${ATTR}="row"][style*="--codexpp-project-blue-token-override"] {
+        --color-accent-blue: var(--codexpp-project-blue-token-override);
+        --color-token-charts-blue: var(--codexpp-project-blue-token-override);
+        --vscode-charts-blue: var(--codexpp-project-blue-token-override);
+        --vscode-terminal-ansiBlue: var(--codexpp-project-blue-token-override);
+        --vscode-terminal-ansiBrightBlue: var(--codexpp-project-blue-token-override);
+      }
+
+      [${ATTR}="row"][style*="--codexpp-project-link-token-override"] {
+        --color-token-text-link-foreground: var(--codexpp-project-link-token-override);
+        --color-token-text-link-active-foreground: var(--codexpp-project-link-token-override);
+        --vscode-textLink-foreground: var(--codexpp-project-link-token-override);
+        --vscode-textLink-activeForeground: var(--codexpp-project-link-token-override);
+      }
+
+      [${ATTR}="project-list"] {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 4px !important;
+      }
+
+      [${ATTR}="row"]:hover {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-tint, var(--color-token-text-secondary)) 10%,
+          transparent
+        ) !important;
+      }
+
+      [${ATTR}="icon"],
+      [${ATTR}="title"] {
+        color: var(--codexpp-project-text-color, var(--codexpp-project-tint, currentColor)) !important;
+      }
+
+      [${ATTR}="unread"] {
+        background-color: var(--codexpp-project-tint, currentColor) !important;
+        color: var(--codexpp-project-tint, currentColor) !important;
+        fill: var(--codexpp-project-tint, currentColor) !important;
+        stroke: var(--codexpp-project-tint, currentColor) !important;
+      }
+
+      [${ATTR}="row"] [class*="bg-token-charts-blue"],
+      [${ATTR}="row"] [class*="bg-token-accent"],
+      [${ATTR}="row"] [class*="bg-token-link"],
+      [${ATTR}="row"] [data-testid*="unread" i],
+      [${ATTR}="row"] [aria-label*="unread" i] {
+        background-color: var(--codexpp-project-tint, currentColor) !important;
+      }
+
+      [${ATTR}="row"] [class*="text-token-charts-blue"],
+      [${ATTR}="row"] [class*="text-token-accent"],
+      [${ATTR}="row"] [class*="text-token-link"],
+      [${ATTR}="row"] [data-testid*="unread" i],
+      [${ATTR}="row"] [aria-label*="unread" i] {
+        color: var(--codexpp-project-tint, currentColor) !important;
+        fill: var(--codexpp-project-tint, currentColor) !important;
+        stroke: var(--codexpp-project-tint, currentColor) !important;
+      }
+
+      aside.pointer-events-auto.relative.flex.overflow-hidden
+        [role="button"].hover\\:bg-token-list-hover-background:not(.group\\/folder-row) {
+        margin-inline: 4px !important;
+        width: calc(100% - 8px) !important;
+      }
+
+      [${MENU_ATTR}="root"] {
+        position: fixed;
+        z-index: 2147483647;
+        min-width: 180px;
+        border: 1px solid var(--color-token-border, var(--color-border)) !important;
+        border-radius: var(--radius-lg, 0.5rem);
+        background: var(--color-background-panel, var(--color-token-bg-fog));
+        box-shadow: var(--shadow-lg, 0 10px 24px rgb(0 0 0 / 0.16));
+        padding: var(--spacing-1, 0.25rem);
+      }
+
+      [${MENU_ATTR}="item"] {
+        width: 100%;
+        border-radius: var(--radius-md, 0.375rem);
+      }
+
+      [${MENU_ATTR}="swatch"] {
+        background-color: var(--codexpp-project-menu-color, currentColor);
+      }
+
+      [${MENU_ATTR}="trigger"] {
+        color: var(--color-token-foreground);
+      }
+    `;
+    document.head.appendChild(style);
+
+    const normalize = (value) =>
+      String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    const visible = (node) => {
+      if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+      if (node.closest("[hidden], [inert], [aria-hidden='true']")) return false;
+      const style = window.getComputedStyle(node);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0"
+      ) {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const mainSidebar = () => {
+      const aside = document.querySelector(ASIDE_SELECTOR);
+      return aside instanceof HTMLElement ? aside : null;
+    };
+
+    const labelFor = (node) =>
+      normalize(
+        node.getAttribute("aria-label") ||
+          node.getAttribute("title") ||
+          node.textContent ||
+          "",
+      ).replace(/\s*[⌘⇧⌥⌃^].*$/, "");
+
+    const isProjectRow = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (!visible(node)) return false;
+      if (node.getAttribute("role") !== "listitem") return false;
+      if (!node.classList.contains("group/cwd")) return false;
+
+      const text = labelFor(node);
+      if (!text || text.length < 2 || text.length > 80) return false;
+      if (EXCLUDED_LABELS.has(text)) return false;
+
+      const action = node.querySelector("[role='button'][aria-label]");
+      return action instanceof HTMLElement && labelFor(action) === text;
+    };
+
+    const candidateRows = (sidebar) =>
+      Array.from(sidebar.querySelectorAll("div[role='listitem'][aria-label]"))
+        .filter(isProjectRow)
+        .filter((node, index, rows) => rows.indexOf(node) === index);
+
+    const clearMarks = () => {
+      for (const [row, handler] of rowHandlers) {
+        row.removeEventListener("contextmenu", handler);
+      }
+      rowHandlers.clear();
+      document.querySelectorAll(`[${ATTR}]`).forEach((node) => {
+        if (!(node instanceof Element)) return;
+        node.removeAttribute(ATTR);
+        node.removeAttribute("data-codexpp-sidebar-project-expanded");
+        if ("style" in node) {
+          node.style.removeProperty("--codexpp-project-tint");
+          node.style.removeProperty("--codexpp-project-text-color");
+          node.style.removeProperty("--codexpp-project-blue-token-override");
+          node.style.removeProperty("--codexpp-project-link-token-override");
         }
       });
-      sidebarObserver.observe(sidebar, {
-        attributes: true,
-        attributeFilter: ["class", "style", "aria-current", "aria-expanded", "aria-label"],
-        characterData: true,
-        childList: true,
-        subtree: true,
+    };
+
+    const paletteFor = (text) => {
+      const stored = colorPrefs[projectKey(text)];
+      const match = PALETTE.find((color) => color.id === stored);
+      if (match) return match;
+
+      let hash = 0;
+      for (let i = 0; i < text.length; i += 1) {
+        hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+      }
+      return PALETTE[hash % 4];
+    };
+
+    const tintFor = (text) => paletteFor(text).value;
+
+    const textColorFor = (text) => {
+      const color = paletteFor(text);
+      return color.textValue || color.value;
+    };
+
+    const blueTokenOverrideFor = (text) => {
+      const color = paletteFor(text);
+      return color.id === "blue" ? "" : color.value;
+    };
+
+    const linkTokenOverrideFor = (text) => {
+      const color = paletteFor(text);
+      return color.id === "blue" ? "" : textColorFor(text);
+    };
+
+    const markRows = (rows) => {
+      reconcileProjectLists(rows);
+      for (const row of rows) {
+        if (!(row instanceof HTMLElement)) continue;
+        const label = labelFor(row);
+        setAttr(row, ATTR, "row");
+        setAttr(row, "data-codexpp-sidebar-project-expanded", String(isExpandedProject(row)));
+        setStyleVar(row, "--codexpp-project-tint", tintFor(label));
+        setStyleVar(row, "--codexpp-project-text-color", textColorFor(label));
+        setOptionalStyleVar(row, "--codexpp-project-blue-token-override", blueTokenOverrideFor(label));
+        setOptionalStyleVar(row, "--codexpp-project-link-token-override", linkTokenOverrideFor(label));
+        markProjectParts(row, label);
+        if (!rowHandlers.has(row)) bindColorMenu(row, label);
+      }
+    };
+
+    const reconcileProjectLists = (rows) => {
+      const parents = new Set(
+        rows
+          .map((row) => row.parentElement)
+          .filter((node) => node instanceof HTMLElement),
+      );
+      document.querySelectorAll(`[${ATTR}="project-list"]`).forEach((node) => {
+        if (!parents.has(node)) node.removeAttribute(ATTR);
       });
-      log("attached", sidebarSummary(sidebar));
+      for (const parent of parents) {
+        setAttr(parent, ATTR, "project-list");
+      }
+    };
+
+    const projectKey = (label) => normalize(label);
+
+    function readColorPrefs() {
+      const value = api.storage.get(COLOR_STORAGE_KEY, {});
+      const stored = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+      const cached = window[colorPrefsCacheKey];
+      return cached && typeof cached === "object" && !Array.isArray(cached)
+        ? { ...stored, ...cached }
+        : stored;
     }
 
-    function sidebarSummary(node) {
-      const rect = node.getBoundingClientRect();
-      return {
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-        buttons: node.querySelectorAll("button, a").length,
-        text: compactText(node.textContent || "").slice(0, 120),
+    const writeColorPrefs = () => {
+      colorPrefs = { ...colorPrefs };
+      window[colorPrefsCacheKey] = colorPrefs;
+      return api.storage.set(COLOR_STORAGE_KEY, colorPrefs);
+    };
+
+    const isExpandedProject = (row) => {
+      if (row.getBoundingClientRect().height > 40) return true;
+      return Boolean(row.querySelector('[role="list"][aria-label]'));
+    };
+
+    const markProjectParts = (row, label) => {
+      const header = Array.from(row.querySelectorAll("[role='button'][aria-label]"))
+        .find((node) => node instanceof HTMLElement && labelFor(node) === label);
+      const target = header instanceof HTMLElement ? header : row.querySelector("[role='button'][aria-label]");
+      if (!(target instanceof HTMLElement)) return;
+
+      target.querySelectorAll("svg").forEach((node) => {
+        if (node instanceof SVGElement) setAttr(node, ATTR, "icon");
+      });
+
+      const title = Array.from(target.querySelectorAll("span"))
+        .filter((node) => node instanceof HTMLElement && normalize(node.textContent) === normalize(label))
+        .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+      if (title instanceof HTMLElement) setAttr(title, ATTR, "title");
+
+      row.querySelectorAll(
+        [
+          '[class*="bg-token-charts-blue"]',
+          '[class*="bg-token-accent"]',
+          '[class*="bg-token-link"]',
+          '[class*="text-token-charts-blue"]',
+          '[class*="text-token-accent"]',
+          '[class*="text-token-link"]',
+          '[class*="unread" i]',
+          '[data-testid*="unread" i]',
+          '[aria-label*="unread" i]',
+        ].join(", "),
+      )
+        .forEach((node) => {
+          if (node instanceof HTMLElement) setAttr(node, ATTR, "unread");
+        });
+    };
+
+    const bindColorMenu = (row, label) => {
+      const handler = (event) => {
+        pendingContextMenu = {
+          label,
+          x: event.clientX,
+          y: event.clientY,
+          at: Date.now(),
+        };
+        [0, 50, 150, 350].forEach((delay) =>
+          window.setTimeout(injectColorMenuIntoNativeMenu, delay),
+        );
       };
+      row.addEventListener("contextmenu", handler);
+      rowHandlers.set(row, handler);
+    };
+
+    const openColorMenu = (label, x, y, anchor) => {
+      closeMenu();
+      const selected = colorPrefs[projectKey(label)] || "auto";
+      menu = document.createElement("div");
+      menu.setAttribute(MENU_ATTR, "root");
+      menu.className = "flex flex-col gap-0.5";
+
+      const title = document.createElement("div");
+      title.className = "px-2 py-1 text-xs text-token-text-secondary";
+      title.textContent = "Project color";
+      menu.appendChild(title);
+
+      const options = [
+        { id: "auto", label: "Auto", value: "var(--color-token-text-secondary)" },
+        ...PALETTE,
+      ];
+      for (const option of options) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.setAttribute(MENU_ATTR, "item");
+        item.setAttribute("data-color-id", option.id);
+        item.className =
+          "flex h-token-button-composer items-center gap-2 px-2 text-left text-sm " +
+          "text-token-text-primary hover:bg-token-foreground/10 cursor-interaction";
+        item.setAttribute("aria-pressed", String(selected === option.id));
+
+        const swatch = document.createElement("span");
+        swatch.setAttribute(MENU_ATTR, "swatch");
+        swatch.className = "size-3 shrink-0 rounded-full border border-token-border";
+        swatch.style.setProperty("--codexpp-project-menu-color", option.value);
+
+        const text = document.createElement("span");
+        text.className = "min-w-0 flex-1 truncate";
+        text.textContent = option.label;
+
+        const check = document.createElement("span");
+        check.setAttribute(MENU_ATTR, "check");
+        check.className = "text-token-text-secondary";
+        check.textContent = selected === option.id ? "✓" : "";
+
+        item.append(swatch, text, check);
+        item.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (option.id === "auto") delete colorPrefs[projectKey(label)];
+          else colorPrefs[projectKey(label)] = option.id;
+          applyColorToCurrentRows(label);
+          syncNativeMenuChecks(label);
+          try {
+            await writeColorPrefs();
+          } catch (e) {
+            api.log.warn("sidebar project color write failed", e);
+          }
+          applyColorToCurrentRows(label);
+          closeMenu();
+          scheduleApply();
+        });
+        menu.appendChild(item);
+      }
+
+      document.body.appendChild(menu);
+      const rect = menu.getBoundingClientRect();
+      const anchorRect = anchor?.getBoundingClientRect?.();
+      const left = anchorRect ? anchorRect.right + 4 : x;
+      const top = anchorRect ? anchorRect.top : y;
+      menu.style.left = `${Math.max(8, Math.min(left, window.innerWidth - rect.width - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - rect.height - 8))}px`;
+
+      window.setTimeout(() => {
+        document.addEventListener("pointerdown", closeMenuOnOutside, true);
+        document.addEventListener("keydown", closeMenuOnKey, true);
+      }, 0);
+    };
+
+    function closeMenu() {
+      document.removeEventListener("pointerdown", closeMenuOnOutside, true);
+      document.removeEventListener("keydown", closeMenuOnKey, true);
+      menu?.remove();
+      menu = null;
     }
 
-    function scheduleScan() {
-      if (scanScheduled) return;
+    function closeMenuOnOutside(event) {
+      if (menu?.contains(event.target)) return;
+      closeMenu();
+    }
+
+    function closeMenuOnKey(event) {
+      if (event.key === "Escape") closeMenu();
+    }
+
+    const injectColorMenuIntoNativeMenu = () => {
+      if (!pendingContextMenu || Date.now() - pendingContextMenu.at > 1500) return;
+      const nativeMenu = findNativeContextMenu(pendingContextMenu.x, pendingContextMenu.y);
+      if (!nativeMenu || nativeMenu.querySelector(`[${MENU_ATTR}="trigger"]`)) return;
+
+      const trigger = document.createElement("div");
+      trigger.setAttribute("role", "menuitem");
+      trigger.setAttribute("tabindex", "-1");
+      trigger.setAttribute(MENU_ATTR, "trigger");
+      trigger.className =
+        "text-token-foreground outline-hidden rounded-lg px-[var(--padding-row-x)] " +
+        "py-[var(--padding-row-y)] text-sm electron:text-base flex w-full items-center " +
+        "group hover:bg-token-list-hover-background focus:bg-token-list-hover-background " +
+        "cursor-interaction";
+
+      const label = document.createElement("span");
+      label.className = "min-w-0 flex-1 truncate";
+      label.textContent = "Project color";
+
+      const chevron = document.createElement("span");
+      chevron.className = "text-token-text-secondary";
+      chevron.textContent = "›";
+
+      trigger.append(label, chevron);
+      const open = (event) => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        openColorMenu(pendingContextMenu.label, pendingContextMenu.x, pendingContextMenu.y, trigger);
+      };
+      trigger.addEventListener("pointerenter", open);
+      trigger.addEventListener("focus", open);
+      trigger.addEventListener("click", open);
+      nativeMenu.appendChild(trigger);
+    };
+
+    const findNativeContextMenu = (x, y) => {
+      const menus = Array.from(document.querySelectorAll('[role="menu"][data-state="open"]'))
+        .filter((node) => node instanceof HTMLElement && !node.hasAttribute(MENU_ATTR));
+      return menus
+        .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+        .sort((a, b) => {
+          const da = Math.abs(a.rect.left - x) + Math.abs(a.rect.top - y);
+          const db = Math.abs(b.rect.left - x) + Math.abs(b.rect.top - y);
+          return da - db;
+        })[0]?.node || null;
+    };
+
+    const syncNativeMenuChecks = (label) => {
+      const selected = colorPrefs[projectKey(label)] || "auto";
+      menu?.querySelectorAll(`[${MENU_ATTR}="item"]`).forEach((item) => {
+        const id = item.getAttribute("data-color-id");
+        item.setAttribute("aria-pressed", String(id === selected));
+        const check = item.querySelector(`[${MENU_ATTR}="check"]`);
+        if (check) check.textContent = id === selected ? "✓" : "";
+      });
+    };
+
+    const applyColorToCurrentRows = (label) => {
+      const sidebar = mainSidebar();
+      if (!sidebar) return;
+      const rows = candidateRows(sidebar).filter((row) => labelFor(row) === projectKey(label));
+      markRows(rows);
+    };
+
+
+    const apply = () => {
+      const sidebar = mainSidebar();
+      if (!sidebar) {
+        return;
+      }
+
+      let rows = candidateRows(sidebar);
+      rows = rows.filter((node, index) => rows.indexOf(node) === index);
+      const seenLabels = new Set();
+      rows = rows.filter((node) => {
+        const label = labelFor(node);
+        if (!label || seenLabels.has(label)) return false;
+        seenLabels.add(label);
+        return true;
+      });
+      if (!rows.length) {
+        return;
+      }
+
+      reconcileMarkedRows(rows);
+      markRows(rows);
+      if (apply._lastCount !== rows.length) {
+        apply._lastCount = rows.length;
+        api.log.info("sidebar project backgrounds marked rows", {
+          count: rows.length,
+          labels: rows.slice(0, 8).map(labelFor),
+        });
+      }
+    };
+
+    const reconcileMarkedRows = (rows) => {
+      const active = new Set(rows);
+      for (const [row, handler] of Array.from(rowHandlers.entries())) {
+        if (active.has(row) && row.isConnected) continue;
+        row.removeEventListener("contextmenu", handler);
+        rowHandlers.delete(row);
+        clearRowMarks(row);
+      }
+    };
+
+    const clearRowMarks = (row) => {
+      row.removeAttribute(ATTR);
+      row.removeAttribute("data-codexpp-sidebar-project-expanded");
+      row.style.removeProperty("--codexpp-project-tint");
+      row.style.removeProperty("--codexpp-project-text-color");
+      row.style.removeProperty("--codexpp-project-blue-token-override");
+      row.style.removeProperty("--codexpp-project-link-token-override");
+      row.querySelectorAll(`[${ATTR}]`).forEach((node) => node.removeAttribute(ATTR));
+    };
+
+    const setAttr = (node, name, value) => {
+      if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+    };
+
+    const setStyleVar = (node, name, value) => {
+      if (node.style.getPropertyValue(name) !== value) node.style.setProperty(name, value);
+    };
+
+    const setOptionalStyleVar = (node, name, value) => {
+      if (value) setStyleVar(node, name, value);
+      else if (node.style.getPropertyValue(name)) node.style.removeProperty(name);
+    };
+
+    let scheduled = false;
+    const scheduleApply = () => {
+      if (scheduled || disposed) return;
+      scheduled = true;
+      window.setTimeout(() => {
+        scheduled = false;
+        if (disposed) return;
+        apply();
+      }, 0);
+    };
+
+    let childListTimer = null;
+    const scheduleApplySoon = () => {
+      if (disposed || childListTimer) return;
+      childListTimer = window.setTimeout(() => {
+        childListTimer = null;
+        scheduleApply();
+      }, 120);
+    };
+
+    scheduleApply();
+    const retryTimers = [250, 1000, 2500].map((delay) =>
+      window.setTimeout(scheduleApply, delay),
+    );
+    const observer = new MutationObserver(scheduleApplySoon);
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("focus", scheduleApply);
+    document.addEventListener("visibilitychange", scheduleApply);
+
+    api.log.info("sidebar project backgrounds active");
+
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      if (childListTimer) window.clearTimeout(childListTimer);
+      retryTimers.forEach((timer) => window.clearTimeout(timer));
+      window.removeEventListener("focus", scheduleApply);
+      document.removeEventListener("visibilitychange", scheduleApply);
+      closeMenu();
+      clearMarks();
+      style.remove();
+    };
+  },
+
+  /**
+   * Add a Codex-native hover line to assistant messages with turn metrics.
+   * Metrics are read from the main process, which parses Codex's local
+   * `token_count` + `task_complete` JSONL events.
+   */
+  "show-message-metrics-on-hover"(api) {
+    const mounted = new Map();
+    const streamStats = new WeakMap();
+    let metrics = [];
+    let disposed = false;
+    let scanScheduled = false;
+
+    const refreshMetrics = async () => {
+      try {
+        const next = await api.ipc.invoke("message-metrics");
+        if (Array.isArray(next)) {
+          metrics = next;
+          scheduleScan();
+        }
+      } catch (e) {
+        api.log.warn("[message-metrics] metrics unavailable", e);
+      }
+    };
+
+    const scheduleScan = () => {
+      if (scanScheduled || disposed) return;
       scanScheduled = true;
       requestAnimationFrame(() => {
         scanScheduled = false;
-        attachSidebar(findSidebar());
+        scanMessages();
       });
-    }
+    };
 
-    const documentObserver = new MutationObserver(scheduleScan);
-    documentObserver.observe(document.body, { childList: true, subtree: true });
-    attachSidebar(findSidebar());
-
-    const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-    const previousOnCommitFiberRoot = hook?.onCommitFiberRoot;
-    if (hook && typeof previousOnCommitFiberRoot === "function") {
-      hook.onCommitFiberRoot = function (...args) {
-        if (findSidebar()) commitCount += 1;
-        return previousOnCommitFiberRoot.apply(this, args);
-      };
-      log("react commit hook attached");
-    } else {
-      log("react devtools hook unavailable");
-    }
-
-    flushTimer = window.setInterval(() => {
-      const commits = commitCount - lastCommitCount;
-      lastCommitCount = commitCount;
-      const hasDomActivity = Object.values(stats).some((value) => value > 0);
-      if (hasDomActivity || commits > 0) {
-        log("sample", {
-          ...stats,
-          commits,
-          sidebar: sidebar?.isConnected ? sidebarSummary(sidebar) : null,
-        });
+    const scanMessages = () => {
+      if (disposed || metrics.length === 0) return;
+      const nodes = document.querySelectorAll("div.group.flex.min-w-0.flex-col");
+      for (const node of nodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        const markdown = node.querySelector("._markdownContent_1rhk1_42");
+        if (!markdown) continue;
+        const rawText = markdown.textContent || "";
+        trackVisibleStream(streamStats, markdown, rawText);
+        const text = cleanMetricText(markdown.textContent || "");
+        if (text.length < 12) continue;
+        const match = findMetricForText(metrics, text);
+        if (!match) continue;
+        const displayMetric = addObservedTps(match, streamStats.get(markdown));
+        let line = node.querySelector("[data-codexpp-message-metrics]");
+        if (!line) {
+          line = renderMessageMetricLine(displayMetric);
+          node.appendChild(line);
+        } else {
+          updateMessageMetricLine(line, displayMetric);
+        }
+        mounted.set(node, line);
       }
-      stats = freshStats();
-    }, FLUSH_MS);
+    };
 
-    log("active");
+    const observer = new MutationObserver(scheduleScan);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    refreshMetrics();
+    const timer = window.setInterval(refreshMetrics, 5_000);
 
     return () => {
-      documentObserver.disconnect();
-      sidebarObserver?.disconnect();
-      if (flushTimer) window.clearInterval(flushTimer);
-      if (
-        hook &&
-        typeof previousOnCommitFiberRoot === "function" &&
-        hook.onCommitFiberRoot !== previousOnCommitFiberRoot
-      ) {
-        hook.onCommitFiberRoot = previousOnCommitFiberRoot;
-      }
-      log("stopped");
+      disposed = true;
+      observer.disconnect();
+      window.clearInterval(timer);
+      for (const [, line] of mounted) line.remove();
+      mounted.clear();
     };
   },
+
 };
 
 // ─────────────────────────────────────────────────────────────── helpers ──
+
+// ── message metrics ───────────────────────────────────────────────────────
+const METRICS_GLOBAL_KEY = "__bennettUiImprovementsMessageMetrics";
+const METRICS_HANDLER_KEY = "__bennettUiImprovementsMessageMetricsHandler";
+const USAGE_GLOBAL_KEY = "__bennettUiImprovementsUsageService";
+const USAGE_HANDLER_KEY = "__bennettUiImprovementsUsageHandler";
+
+function startMainMetricsProvider(api) {
+  const service = createMetricsService(api);
+  globalThis[METRICS_GLOBAL_KEY] = service;
+
+  // Codex++ currently exposes `handle()` without a matching removeHandler().
+  // Keep the registered IPC handler stable across hot reloads and swap the
+  // service behind it instead.
+  if (!globalThis[METRICS_HANDLER_KEY]) {
+    api.ipc.handle("message-metrics", () => {
+      const active = globalThis[METRICS_GLOBAL_KEY];
+      return active?.getMetrics?.() || [];
+    });
+    globalThis[METRICS_HANDLER_KEY] = true;
+  }
+
+  api.log.info("[message-metrics] main provider active");
+}
+
+function startMainUsageProvider(api) {
+  const service = createUsageService(api);
+  globalThis[USAGE_GLOBAL_KEY] = service;
+
+  if (!globalThis[USAGE_HANDLER_KEY]) {
+    api.ipc.handle("usage-fetch", (_url = "/wham/usage") => {
+      const active = globalThis[USAGE_GLOBAL_KEY];
+      return active?.fetchUsage?.() || null;
+    });
+    globalThis[USAGE_HANDLER_KEY] = true;
+  }
+
+  api.log.info("[usage] main provider active");
+}
+
+function createUsageService(api) {
+  let cache = { at: 0, value: null };
+  const TTL_MS = 10_000;
+
+  return {
+    async fetchUsage() {
+      const now = Date.now();
+      if (cache.value && now - cache.at < TTL_MS) return cache.value;
+      const value = await fetchUsageInCodexWebview();
+      cache = { at: Date.now(), value };
+      return value;
+    },
+  };
+
+  async function fetchUsageInCodexWebview() {
+    const { webContents } = require("electron");
+    const candidates = webContents
+      .getAllWebContents()
+      .filter((wc) => {
+        const url = wc.getURL();
+        return !wc.isDestroyed() && (url.startsWith("app://") || url.includes("codex"));
+      });
+
+    let lastError = null;
+    for (const wc of candidates) {
+      try {
+        return await wc.executeJavaScript(usageFetchScript(), true);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError || new Error("no Codex webview available for usage fetch");
+  }
+
+  function usageFetchScript() {
+    return `(() => new Promise((resolve, reject) => {
+      const bridge = window.electronBridge;
+      if (typeof bridge?.sendMessageFromView !== "function") {
+        reject(new Error("electronBridge unavailable"));
+        return;
+      }
+      const hostId = new URL(window.location.href).searchParams.get("hostId")?.trim() || "local";
+      const requestId = "codexpp-main-usage-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+      let done = false;
+      const cleanup = () => {
+        done = true;
+        window.removeEventListener("message", onMessage);
+        window.clearTimeout(timer);
+      };
+      const finish = (fn, value) => {
+        if (done) return;
+        cleanup();
+        fn(value);
+      };
+      const onMessage = (event) => {
+        const data = event.data;
+        if (!data || typeof data !== "object" || data.type !== "fetch-response" || data.requestId !== requestId) return;
+        if (data.responseType === "success") {
+          try {
+            const body = JSON.parse(data.bodyJsonString);
+            if (data.status >= 200 && data.status < 300) finish(resolve, body);
+            else finish(reject, new Error("HTTP " + data.status));
+          } catch (error) {
+            finish(reject, error);
+          }
+        } else {
+          finish(reject, new Error(data.error || "fetch failed"));
+        }
+      };
+      const timer = window.setTimeout(() => {
+        bridge.sendMessageFromView({ type: "cancel-fetch", requestId }).catch(() => {});
+        finish(reject, new Error("usage request timed out"));
+      }, 10000);
+      window.addEventListener("message", onMessage);
+      bridge.sendMessageFromView({
+        type: "fetch",
+        hostId,
+        requestId,
+        method: "GET",
+        url: "/wham/usage",
+      }).catch((error) => finish(reject, error));
+    }))();`;
+  }
+}
+
+function createMetricsService(api) {
+  let cache = { at: 0, items: [] };
+  const TTL_MS = 2_000;
+
+  return {
+    getMetrics() {
+      const now = Date.now();
+      if (now - cache.at < TTL_MS) return cache.items;
+      try {
+        cache = { at: now, items: readRecentMessageMetrics() };
+      } catch (e) {
+        api.log.warn("[message-metrics] scan failed", e);
+        cache = { at: now, items: [] };
+      }
+      return cache.items;
+    },
+  };
+}
+
+function readRecentMessageMetrics() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const home = process.env.HOME || require("node:os").homedir();
+  const roots = [
+    path.join(home, ".codex", "sessions"),
+    path.join(home, ".codex", "archived_sessions"),
+  ];
+  const files = [];
+  for (const root of roots) collectJsonlFiles(fs, root, files);
+
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  const byKey = new Map();
+  for (const file of files.slice(0, 20)) {
+    // Some long-running archived rollouts can be huge; recent visible
+    // conversations are covered by the smaller active session files.
+    if (file.size > 12 * 1024 * 1024) continue;
+    for (const item of parseMetricsFile(fs, file.path)) {
+      const key = item.turnId || `${item.completedAt}:${item.clean.slice(0, 80)}`;
+      if (!byKey.has(key)) byKey.set(key, item);
+    }
+    if (byKey.size >= 300) break;
+  }
+
+  return Array.from(byKey.values())
+    .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0))
+    .slice(0, 300);
+}
+
+function collectJsonlFiles(fs, dir, out) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      collectJsonlFiles(fs, full, out);
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      try {
+        const stat = fs.statSync(full);
+        out.push({ path: full, mtimeMs: stat.mtimeMs, size: stat.size });
+      } catch {
+        // Ignore files that vanish during traversal.
+      }
+    }
+  }
+}
+
+function parseMetricsFile(fs, file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+
+  const items = [];
+  let lastUsage = null;
+  for (const line of text.split("\n")) {
+    if (!line.includes('"type":"token_count"') && !line.includes('"type":"task_complete"')) {
+      continue;
+    }
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = row?.payload;
+    if (payload?.type === "token_count") {
+      lastUsage = payload.info || null;
+      continue;
+    }
+    if (payload?.type !== "task_complete" || !payload.last_agent_message) {
+      continue;
+    }
+
+    const clean = cleanMetricText(payload.last_agent_message);
+    if (!clean) continue;
+    const usage = lastUsage?.last_token_usage || null;
+
+    items.push({
+      turnId: payload.turn_id || null,
+      clean,
+      completedAt: numberOrNull(payload.completed_at),
+      usage,
+      contextWindow: numberOrNull(lastUsage?.model_context_window),
+    });
+  }
+  return items;
+}
+
+function renderMessageMetricLine(metric) {
+  const line = document.createElement("div");
+  line.dataset.codexppMessageMetrics = "true";
+  line.className =
+    "mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs " +
+    "text-token-text-secondary opacity-0 transition-opacity duration-150 " +
+    "group-hover:opacity-100";
+  updateMessageMetricLine(line, metric);
+  return line;
+}
+
+function updateMessageMetricLine(line, metric) {
+  const usage = metric.usage || {};
+  const parts = [];
+  if (typeof usage.input_tokens === "number") {
+    parts.push(`${formatCount(usage.input_tokens)} in`);
+  }
+  if (typeof usage.output_tokens === "number") {
+    parts.push(`${formatCount(usage.output_tokens)} out`);
+  }
+  if (typeof usage.reasoning_output_tokens === "number" && usage.reasoning_output_tokens > 0) {
+    parts.push(`${formatCount(usage.reasoning_output_tokens)} reasoning`);
+  }
+  if (typeof metric.observedTps === "number" && Number.isFinite(metric.observedTps)) {
+    parts.push(`${formatTps(metric.observedTps)} tok/s`);
+  }
+  const text = parts.join(" · ");
+  const title = messageMetricTitle(metric);
+  if (line.textContent !== text) line.textContent = text;
+  if (line.title !== title) line.title = title;
+}
+
+function trackVisibleStream(streamStats, markdown, rawText) {
+  const now = performance.now();
+  const text = String(rawText || "");
+  const previous = streamStats.get(markdown);
+  if (!previous) {
+    streamStats.set(markdown, {
+      firstAt: now,
+      lastAt: now,
+      lastText: text,
+      frozenTps: null,
+    });
+    return;
+  }
+  if (previous.lastText === text) return;
+  if (!previous.lastText && text) previous.firstAt = now;
+  previous.lastAt = now;
+  previous.lastText = text;
+}
+
+function addObservedTps(metric, stat) {
+  if (!stat) return metric;
+  if (typeof stat.frozenTps === "number") {
+    return { ...metric, observedTps: stat.frozenTps };
+  }
+  const outputTokens = numberOrNull(metric.usage?.output_tokens);
+  const elapsedMs = stat.lastAt - stat.firstAt;
+  if (outputTokens == null || elapsedMs < 500) return metric;
+  stat.frozenTps = outputTokens / (elapsedMs / 1000);
+  return { ...metric, observedTps: stat.frozenTps };
+}
+
+function findMetricForText(metrics, visibleText) {
+  const clean = cleanMetricText(visibleText);
+  if (!clean) return null;
+  for (const metric of metrics) {
+    const candidate = metric.clean || "";
+    if (!candidate) continue;
+    const head = candidate.slice(0, Math.min(120, candidate.length));
+    const tail = candidate.slice(Math.max(0, candidate.length - 80));
+    if (head.length >= 30 && clean.includes(head)) return metric;
+    if (clean.length >= 80 && candidate.includes(clean.slice(0, 120))) return metric;
+    if (head.length >= 30 && tail.length >= 30 && clean.includes(head) && clean.includes(tail)) {
+      return metric;
+    }
+  }
+  return null;
+}
+
+function cleanMetricText(text) {
+  return String(text || "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/`+/g, "")
+    .replace(/[*_~#>[\](){}|]/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function messageMetricTitle(metric) {
+  const usage = metric.usage || {};
+  const lines = [
+    `Input tokens: ${formatRaw(usage.input_tokens)}`,
+    `Cached input: ${formatRaw(usage.cached_input_tokens)}`,
+    `Output tokens: ${formatRaw(usage.output_tokens)}`,
+    `Reasoning output: ${formatRaw(usage.reasoning_output_tokens)}`,
+    `Total tokens: ${formatRaw(usage.total_tokens)}`,
+  ];
+  if (typeof metric.observedTps === "number") {
+    lines.push(`Observed stream rate: ${formatTps(metric.observedTps)} tok/s`);
+  }
+  return lines.join("\n");
+}
+
+function formatCount(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 1000000) return `${(n / 1000000).toFixed(1)}m`;
+  if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function formatRaw(n) {
+  return typeof n === "number" && Number.isFinite(n) ? String(n) : "—";
+}
+
+function formatTps(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  return n >= 10 ? String(Math.round(n)) : n.toFixed(1);
+}
+
+function numberOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 
 // ── usage snapshot persistence ────────────────────────────────────────────
 // Stored under storage["usage:snapshot"]; survives reloads. Schema:
@@ -1295,6 +2738,23 @@ function renderUsageBox(api, snapshot) {
 
   btn.append(left, right);
 
+  const setText = (node, text) => {
+    if (node.textContent !== text) node.textContent = text;
+  };
+  const setClass = (node, className) => {
+    if (node.className !== className) node.className = className;
+  };
+  const singleRightSpan = () => {
+    let child = right.firstElementChild;
+    if (!(child instanceof HTMLSpanElement)) {
+      child = document.createElement("span");
+      right.replaceChildren(child);
+      return child;
+    }
+    while (child.nextSibling) child.nextSibling.remove();
+    return child;
+  };
+
   /** Pull the entry for `kind` out of the live snapshot. */
   const entryFor = (snap, k) => (k === "5h" ? snap.fiveHour : snap.weekly);
 
@@ -1310,25 +2770,21 @@ function renderUsageBox(api, snapshot) {
     btn.classList.toggle("bg-token-foreground/5", !lowEnergy);
     btn.classList.toggle("text-token-text-primary", !lowEnergy);
 
-    left.textContent = entry?.label || (kind === "5h" ? "5h" : "Weekly");
+    setText(left, entry?.label || (kind === "5h" ? "5h" : "Weekly"));
 
-    right.replaceChildren();
-    const pctEl = document.createElement("span");
-    pctEl.textContent = remaining == null ? "—" : `${remaining}%`;
-    pctEl.className = lowEnergy ? "font-medium" : "text-token-text-secondary";
-    right.appendChild(pctEl);
+    const pctEl = singleRightSpan();
+    setText(pctEl, remaining == null ? "—" : `${remaining}%`);
+    setClass(pctEl, lowEnergy ? "font-medium" : "text-token-text-secondary");
   };
 
   /** Replace the entire box content with "Resets: HH:MM". */
   const applyHoverState = (snap) => {
     const entry = entryFor(snap, kind);
-    left.textContent = "Resets:";
-    left.className = "truncate text-token-text-secondary";
-    right.replaceChildren();
-    const t = document.createElement("span");
-    t.className = "tabular-nums";
-    t.textContent = entry?.resetAt || "—";
-    right.appendChild(t);
+    setText(left, "Resets:");
+    setClass(left, "truncate text-token-text-secondary");
+    const t = singleRightSpan();
+    setClass(t, "tabular-nums");
+    setText(t, entry?.resetAt || "—");
   };
 
   // Bind hover with a snapshot getter so handlers always see the latest.
@@ -1344,7 +2800,7 @@ function renderUsageBox(api, snapshot) {
   });
   btn.addEventListener("mouseleave", () => {
     suppressHover = false;
-    left.className = "truncate";
+    setClass(left, "truncate");
     applyValueState(currentSnap);
   });
   btn.addEventListener("click", (e) => {
@@ -1356,7 +2812,7 @@ function renderUsageBox(api, snapshot) {
     // Per the design: clicking shows the OTHER kind's value, even if the
     // cursor is still over the box.
     suppressHover = true;
-    left.className = "truncate";
+    setClass(left, "truncate");
     applyValueState(currentSnap);
   });
 

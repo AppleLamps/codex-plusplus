@@ -10,13 +10,18 @@ import { writeFuse } from "../fuses.js";
 import { adHocSign, clearQuarantine } from "../codesign.js";
 import { readPlist } from "../plist.js";
 import { writeState } from "../state.js";
-import { installWatcher } from "../watcher.js";
+import { installWatcher, type WatcherKind } from "../watcher.js";
+import { CODEX_PLUSPLUS_VERSION } from "../version.js";
+import { installDefaultTweaks } from "../default-tweaks.js";
 
 interface Opts {
   app?: string;
   fuse?: boolean; // sade --no-fuse → fuse: false
   resign?: boolean;
   watcher?: boolean;
+  watcherKind?: WatcherKind;
+  quiet?: boolean;
+  defaultTweaks?: boolean;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,8 +31,9 @@ export async function install(opts: Opts = {}): Promise<void> {
   const fuseFlip = opts.fuse !== false;
   const resign = opts.resign !== false;
   const wantWatcher = opts.watcher !== false;
+  const wantDefaultTweaks = opts.defaultTweaks !== false;
 
-  const step = makeStepper();
+  const step = makeStepper(opts.quiet === true);
   const codex = locateCodex(opts.app);
   step(`Located Codex at ${kleur.cyan(codex.appRoot)}`);
 
@@ -99,7 +105,7 @@ export async function install(opts: Opts = {}): Promise<void> {
   }
 
   // 7. Auto-repair watcher.
-  let watcher: "launchd" | "login-item" | "scheduled-task" | "systemd" | "none" = "none";
+  let watcher: WatcherKind = opts.watcherKind ?? "none";
   if (wantWatcher) {
     try {
       watcher = installWatcher(codex.appRoot);
@@ -109,9 +115,14 @@ export async function install(opts: Opts = {}): Promise<void> {
     }
   }
 
-  // 8. Persist state.
+  // 8. Seed default tweaks from their release channels.
+  if (wantDefaultTweaks) {
+    await installDefaultTweaks(paths.tweaks, step);
+  }
+
+  // 9. Persist state.
   writeState(paths.stateFile, {
-    version: "0.0.1",
+    version: CODEX_PLUSPLUS_VERSION,
     installedAt: new Date().toISOString(),
     appRoot: codex.appRoot,
     originalAsarHash,
@@ -123,11 +134,13 @@ export async function install(opts: Opts = {}): Promise<void> {
     watcher,
   });
 
-  console.log();
-  console.log(kleur.green().bold("✓ codex-plusplus installed."));
-  console.log(`  Tweaks dir: ${kleur.cyan(paths.tweaks)}`);
-  console.log(`  Logs:       ${kleur.cyan(paths.logDir)}`);
-  console.log(`  Launch Codex normally; the Tweaks tab will appear in Settings.`);
+  if (!opts.quiet) {
+    console.log();
+    console.log(kleur.green().bold("✓ codex-plusplus installed."));
+    console.log(`  Tweaks dir: ${kleur.cyan(paths.tweaks)}`);
+    console.log(`  Logs:       ${kleur.cyan(paths.logDir)}`);
+    console.log(`  Launch Codex normally; the Tweaks tab will appear in Settings.`);
+  }
 }
 
 function readCodexVersion(metaPath: string | null): string | null {
@@ -184,7 +197,7 @@ async function injectLoader(asarPath: string, userRoot: string): Promise<string>
   return originalMain;
 }
 
-function stageAssets(runtimeDir: string): void {
+export function stageAssets(runtimeDir: string): void {
   mkdirSync(runtimeDir, { recursive: true });
   const src = join(assetsDir, "runtime");
   if (existsSync(src)) {
@@ -203,9 +216,11 @@ function stageAssets(runtimeDir: string): void {
   );
 }
 
-function makeStepper() {
+function makeStepper(quiet = false) {
   let n = 1;
-  return (msg: string) => console.log(`${kleur.dim(`[${n++}]`)} ${msg}`);
+  return (msg: string) => {
+    if (!quiet) console.log(`${kleur.dim(`[${n++}]`)} ${msg}`);
+  };
 }
 
 /**

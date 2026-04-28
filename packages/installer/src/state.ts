@@ -23,6 +23,8 @@ export interface InstallerState {
   originalEntryPoint: string;
   /** Watcher install method, if any. */
   watcher: "launchd" | "login-item" | "scheduled-task" | "systemd" | "none";
+  /** Last time the user-dir runtime assets were refreshed by repair. */
+  runtimeUpdatedAt?: string;
 }
 
 export function readState(stateFile: string): InstallerState | null {

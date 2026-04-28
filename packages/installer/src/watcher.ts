@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type WatcherKind = "launchd" | "login-item" | "scheduled-task" | "systemd" | "none";
 
@@ -54,8 +55,9 @@ function launchdPath(): string {
 function installLaunchd(appRoot: string): WatcherKind {
   const plPath = launchdPath();
   mkdirSync(dirname(plPath), { recursive: true });
-  // Trigger on login + when Codex.app's asar changes. Run our `repair` command.
-  // We call `npx -y codex-plusplus@latest repair` so the watcher self-updates.
+  // Trigger on login + when Codex.app's asar changes. Run this installed CLI
+  // directly so auto-repair does not depend on npm availability.
+  const repair = xmlEscape(`sleep 5; ${repairShellCommand()} || true`);
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -66,10 +68,12 @@ function installLaunchd(appRoot: string): WatcherKind {
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>command -v npx >/dev/null 2>&amp;1 &amp;&amp; npx -y codex-plusplus@latest doctor || true</string>
+    <string>${repair}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <key>StartInterval</key>
+  <integer>86400</integer>
   <key>WatchPaths</key>
   <array>
     <string>${appRoot}/Contents/Resources/app.asar</string>
@@ -102,22 +106,47 @@ function uninstallLaunchd(): void {
 function installSystemd(appRoot: string): WatcherKind {
   const dir = join(homedir(), ".config", "systemd", "user");
   mkdirSync(dir, { recursive: true });
+  const repair = shellSingleQuote(`sleep 5; ${repairShellCommand()} || true`);
   const unit = `[Unit]
 Description=codex-plusplus repair watcher
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'command -v npx >/dev/null 2>&1 && npx -y codex-plusplus@latest doctor || true'
+ExecStart=/bin/sh -c ${repair}
 
 [Install]
 WantedBy=default.target
 `;
   writeFileSync(join(dir, "codex-plusplus-watcher.service"), unit);
-  // We omit a .path unit here; users running `repair` after Codex updates is
-  // the simpler default. Power users can add a path unit themselves.
+  writeFileSync(join(dir, "codex-plusplus-watcher.timer"), `[Unit]
+Description=codex-plusplus daily self-update check
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`);
+  writeFileSync(join(dir, "codex-plusplus-watcher.path"), `[Unit]
+Description=codex-plusplus app.asar watcher
+
+[Path]
+PathChanged=${appRoot}/resources/app.asar
+
+[Install]
+WantedBy=default.target
+`);
   try {
     execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
     execFileSync("systemctl", ["--user", "enable", "codex-plusplus-watcher.service"], {
+      stdio: "ignore",
+    });
+    execFileSync("systemctl", ["--user", "enable", "--now", "codex-plusplus-watcher.timer"], {
+      stdio: "ignore",
+    });
+    execFileSync("systemctl", ["--user", "enable", "--now", "codex-plusplus-watcher.path"], {
       stdio: "ignore",
     });
   } catch {
@@ -133,14 +162,27 @@ function uninstallSystemd(): void {
     execFileSync("systemctl", ["--user", "disable", "codex-plusplus-watcher.service"], {
       stdio: "ignore",
     });
+    execFileSync("systemctl", ["--user", "disable", "--now", "codex-plusplus-watcher.path"], {
+      stdio: "ignore",
+    });
+    execFileSync("systemctl", ["--user", "disable", "--now", "codex-plusplus-watcher.timer"], {
+      stdio: "ignore",
+    });
   } catch {}
   rmSync(path, { force: true });
+  rmSync(join(homedir(), ".config", "systemd", "user", "codex-plusplus-watcher.path"), {
+    force: true,
+  });
+  rmSync(join(homedir(), ".config", "systemd", "user", "codex-plusplus-watcher.timer"), {
+    force: true,
+  });
 }
 
 function installScheduledTask(_appRoot: string): WatcherKind {
-  // schtasks.exe creates a logon-trigger task. We pass the npx command via /TR.
+  // schtasks.exe creates a logon-trigger task. We pass the repair command via /TR.
   // Quoting on Windows is delicate; leaving this as a TODO until we can test
   // on a real Codex install.
+  const repair = `cmd /c ${windowsCommand()}`;
   try {
     execFileSync("schtasks.exe", [
       "/Create",
@@ -150,7 +192,17 @@ function installScheduledTask(_appRoot: string): WatcherKind {
       "/TN",
       "codex-plusplus-watcher",
       "/TR",
-      `cmd /c npx -y codex-plusplus@latest doctor`,
+      repair,
+    ]);
+    execFileSync("schtasks.exe", [
+      "/Create",
+      "/F",
+      "/SC",
+      "DAILY",
+      "/TN",
+      "codex-plusplus-watcher-daily",
+      "/TR",
+      repair,
     ]);
     return "scheduled-task";
   } catch {
@@ -158,9 +210,41 @@ function installScheduledTask(_appRoot: string): WatcherKind {
   }
 }
 
+function repairShellCommand(): string {
+  return `${shellQuote(process.execPath)} ${shellQuote(currentCliPath())} repair --quiet`;
+}
+
+function currentCliPath(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function windowsCommand(): string {
+  return `"${process.execPath}" "${currentCliPath()}" repair --quiet`;
+}
+
 function uninstallScheduledTask(): void {
   try {
     execFileSync("schtasks.exe", ["/Delete", "/F", "/TN", "codex-plusplus-watcher"], {
+      stdio: "ignore",
+    });
+  } catch {}
+  try {
+    execFileSync("schtasks.exe", ["/Delete", "/F", "/TN", "codex-plusplus-watcher-daily"], {
       stdio: "ignore",
     });
   } catch {}

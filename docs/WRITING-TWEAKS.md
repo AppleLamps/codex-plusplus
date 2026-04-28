@@ -23,6 +23,7 @@ my-tweak/
   "id": "com.you.my-tweak",
   "name": "My Tweak",
   "version": "0.1.0",
+  "githubRepo": "you/my-tweak",
   "description": "Does a thing.",
   "scope": "renderer"
 }
@@ -52,11 +53,18 @@ module.exports = {
 | `id` | yes | Reverse-DNS-ish unique id. |
 | `name` | yes | Human display name. |
 | `version` | yes | Semver. |
+| `githubRepo` | yes | GitHub repository in `owner/repo` form. Used for daily release checks. |
 | `author` | no | Free-form. |
 | `description` | no | One-liner shown in the manager. |
 | `scope` | no | `"renderer"` (default), `"main"`, or `"both"`. |
 | `main` | no | Entry filename. Defaults to `index.js`/`.cjs`/`.mjs`. |
 | `minRuntime` | no | Semver of the minimum runtime your tweak needs. |
+
+## Update checks
+
+Codex++ checks `https://api.github.com/repos/<owner>/<repo>/releases/latest` at most once per day per tweak. If the latest release tag is a higher semver than `version`, the Tweaks page shows **Update Available** and links to the GitHub release.
+
+Updates are never installed automatically. Users should review release notes, code changes, and repository ownership before manually replacing local tweak files.
 
 ## API surface
 

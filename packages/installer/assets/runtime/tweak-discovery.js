@@ -2,13 +2,13 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.discoverTweaks = discoverTweaks;
 /**
- * Discover tweaks under <userRoot>/tweaks. Each tweak is a directory with
- * a manifest.json and an entry script. Entry resolution: manifest.main >
- * index.js > index.mjs > index.cjs.
+ * Discover tweaks under <userRoot>/tweaks. Each tweak is a directory with a
+ * manifest.json and an entry script. Entry resolution is manifest.main first,
+ * then index.js, index.mjs, and index.cjs.
  *
- * We deliberately do not transpile TypeScript here — runtime stays small.
- * Tweak authors who want TS should bundle/transpile in their own toolchain
- * (e.g. tsx, esbuild) before dropping into the tweaks dir, OR ship .js.
+ * The manifest gate is intentionally strict. A tweak must identify its GitHub
+ * repository so the manager can check releases without granting the tweak an
+ * update/install channel. Update checks are advisory only.
  */
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
@@ -31,7 +31,7 @@ function discoverTweaks(tweaksDir) {
         catch {
             continue;
         }
-        if (!manifest.id || !manifest.name || !manifest.version)
+        if (!isValidManifest(manifest))
             continue;
         const entry = resolveEntry(dir, manifest);
         if (!entry)
@@ -39,6 +39,15 @@ function discoverTweaks(tweaksDir) {
         out.push({ dir, entry, manifest });
     }
     return out;
+}
+function isValidManifest(m) {
+    if (!m.id || !m.name || !m.version || !m.githubRepo)
+        return false;
+    if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(m.githubRepo))
+        return false;
+    if (m.scope && !["renderer", "main", "both"].includes(m.scope))
+        return false;
+    return true;
 }
 function resolveEntry(dir, m) {
     if (m.main) {
