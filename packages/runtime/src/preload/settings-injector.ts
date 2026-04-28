@@ -248,6 +248,10 @@ function tryInject(): void {
 
   if (state.navGroup && outer.contains(state.navGroup)) {
     syncPagesGroup();
+    // Codex re-renders its native sidebar buttons on its own state changes.
+    // If one of our pages is active, re-strip Codex's active styling so
+    // General doesn't reappear as selected.
+    if (state.activePage !== null) syncCodexNativeNavActive(true);
     return;
   }
 
@@ -412,6 +416,40 @@ function setNavActive(active: ActivePage | null): void {
     if (!p.navButton) continue;
     const isActive = active?.kind === "registered" && active.id === p.id;
     applyNavActive(p.navButton, isActive);
+  }
+  // Codex's own sidebar buttons (General, Appearance, etc). When one of
+  // our pages is active, Codex still has aria-current="page" and the
+  // active-bg class on whichever item it considered the route — typically
+  // General. That makes both buttons look selected. Strip Codex's active
+  // styling while one of ours is active; restore it when none is.
+  syncCodexNativeNavActive(active !== null);
+}
+
+/**
+ * Mute Codex's own active-state styling on its sidebar buttons. We don't
+ * touch Codex's React state — when the user clicks a native item, Codex
+ * re-renders the buttons and re-applies its own correct state, then our
+ * sidebar-click listener fires `restoreCodexView` (which calls back into
+ * `setNavActive(null)` and lets Codex's styling stand).
+ *
+ * `mute=true`  → strip aria-current and swap active bg → hover bg
+ * `mute=false` → no-op (Codex's own re-render already restored things)
+ */
+function syncCodexNativeNavActive(mute: boolean): void {
+  if (!mute) return;
+  const root = state.sidebarRoot;
+  if (!root) return;
+  const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>("button"));
+  for (const btn of buttons) {
+    // Skip our own buttons.
+    if (btn.dataset.codexpp) continue;
+    if (btn.getAttribute("aria-current") === "page") {
+      btn.removeAttribute("aria-current");
+    }
+    if (btn.classList.contains("bg-token-list-hover-background")) {
+      btn.classList.remove("bg-token-list-hover-background");
+      btn.classList.add("hover:bg-token-list-hover-background");
+    }
   }
 }
 
