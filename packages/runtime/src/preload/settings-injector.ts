@@ -251,6 +251,22 @@ function tryInject(): void {
     return;
   }
 
+  // Sidebar was either freshly mounted (Settings just opened) or re-mounted
+  // (closed and re-opened, or navigated away and back). In all of those
+  // cases Codex resets to its default page (General), but our in-memory
+  // `activePage` may still reference the last tweak/page the user had open
+  // — which would cause that nav button to render with the active styling
+  // even though Codex is showing General. Clear it so `syncPagesGroup` /
+  // `setNavActive` start from a neutral state. The panelHost reference is
+  // also stale (its DOM was discarded with the previous content area).
+  if (state.activePage !== null || state.panelHost !== null) {
+    plog("sidebar re-mount detected; clearing stale active state", {
+      prevActive: state.activePage,
+    });
+    state.activePage = null;
+    state.panelHost = null;
+  }
+
   // ── Group container ───────────────────────────────────────────────────
   const group = document.createElement("div");
   group.dataset.codexpp = "nav-group";
