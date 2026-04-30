@@ -39,6 +39,11 @@ schtasks /Query /TN codex-plusplus-watcher       # Windows
 
 ## Need paths or machine-readable status
 
+In Codex Settings, open Codex Plus Plus -> Config. The Install Health section
+shows runtime version, tweak/log paths, reload status, and recent runtime error
+count. The Support & Maintenance section can open the tweak/log folders and copy
+the common support commands below.
+
 ```sh
 codex-plusplus status
 codex-plusplus status --json
@@ -84,6 +89,10 @@ Codex's Settings markup may have changed. The injector's heuristics need an upda
 
 ## Tweak fails to load
 
+Open Codex Settings -> Codex Plus Plus -> Tweaks. Unavailable tweaks are grouped
+under Needs Attention, their toggles are disabled, and the row shows the load
+reason inline.
+
 Check the renderer console:
 
 ```
@@ -97,6 +106,10 @@ Common causes:
 - `minRuntime` requires a newer Codex++ runtime
 - Entry script throws during `require`
 - ESM-style `export default` in a `.js` file (use `.mjs` or `module.exports`)
+
+Tweaks with Main Process Access show a stronger warning. Codex++ asks for
+confirmation once per renderer session before enabling one, but this is a
+trust prompt only; it does not add a new OS sandbox.
 
 ## Uninstall is incomplete
 

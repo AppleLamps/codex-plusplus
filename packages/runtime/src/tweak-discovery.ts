@@ -79,10 +79,10 @@ function resolveEntry(dir: string, m: TweakManifest): string | null {
 
 function manifestCapabilities(manifest: TweakManifest): string[] {
   const scope = manifest.scope ?? "both";
-  const caps = ["isolated storage", "scoped IPC"];
-  if (scope === "main" || scope === "both") caps.unshift("main process");
-  if (scope === "renderer" || scope === "both") caps.unshift("renderer UI");
-  if (manifest.main) caps.push("custom entry");
-  if (manifest.minRuntime) caps.push("runtime gate");
+  const caps = ["Local Data Storage", "Scoped IPC"];
+  if (scope === "main" || scope === "both") caps.unshift("Main Process Access");
+  if (scope === "renderer" || scope === "both") caps.unshift("Renderer UI");
+  if (manifest.main) caps.push("Custom Entry");
+  if (manifest.minRuntime) caps.push("Runtime Requirement");
   return caps;
 }

@@ -46,6 +46,10 @@ const state = {
     activePage: null,
     sidebarRoot: null,
     sidebarRestoreHandler: null,
+    tweaksSearch: "",
+    tweaksFilter: "all",
+    feedback: new Map(),
+    confirmedMainTweaks: new Set(),
 };
 function plog(msg, extra) {
     electron_1.ipcRenderer.send("codexpp:preload-log", "info", `[settings-injector] ${msg}${extra === undefined ? "" : " " + safeStringify(extra)}`);
@@ -116,6 +120,10 @@ function __resetSettingsInjectorForTests() {
     state.activePage = null;
     state.sidebarRoot = null;
     state.sidebarRestoreHandler = null;
+    state.tweaksSearch = "";
+    state.tweaksFilter = "all";
+    state.feedback.clear();
+    state.confirmedMainTweaks.clear();
 }
 function onNav() {
     state.fingerprint = null;
@@ -515,8 +523,14 @@ function rerender() {
             restoreCodexView();
             return;
         }
-        const root = panelShell(entry.page.title, entry.page.description);
+        const subtitle = entry.page.description
+            ? `${entry.manifest.name}: ${entry.page.description}`
+            : entry.manifest.name;
+        const root = panelShell(entry.page.title, subtitle);
         host.appendChild(root.outer);
+        if (entry.manifest.scope === "main" || entry.manifest.scope === "both") {
+            root.sectionsWrap.appendChild(noticeRow("Main Process Access", "This tweak can run code in Codex's main process. Use settings from sources you trust.", "warn"));
+        }
         try {
             // Tear down any prior render before re-rendering (hot reload).
             try {
@@ -529,10 +543,7 @@ function rerender() {
                 entry.teardown = ret;
         }
         catch (e) {
-            const err = document.createElement("div");
-            err.className = "text-token-charts-red text-sm";
-            err.textContent = `Error rendering page: ${e.message}`;
-            root.sectionsWrap.appendChild(err);
+            root.sectionsWrap.appendChild(errorRow("Error rendering page", e.message));
         }
         return;
     }
@@ -567,14 +578,58 @@ function renderConfigPage(sectionsWrap) {
         card.textContent = "";
         card.appendChild(rowSimple("Could not load update settings", String(e)));
     });
+    renderInstallHealth(sectionsWrap);
     const maintenance = document.createElement("section");
     maintenance.className = "flex flex-col gap-2";
-    maintenance.appendChild(sectionTitle("Maintenance"));
+    maintenance.appendChild(sectionTitle("Support & Maintenance"));
     const maintenanceCard = roundedCard();
-    maintenanceCard.appendChild(uninstallRow());
+    maintenanceCard.appendChild(maintenanceActionRow("Open tweaks folder", "Open the folder where local tweak packages live.", "Open", () => invokeAction("maintenance:open-tweaks", "Opening tweaks folder", "Opened tweaks folder.", () => electron_1.ipcRenderer.invoke("codexpp:reveal", tweaksPath())), "maintenance:open-tweaks"));
+    maintenanceCard.appendChild(maintenanceActionRow("Open logs", "Open Codex++ runtime logs for local debugging.", "Open", () => invokeAction("maintenance:open-logs", "Opening logs", "Opened logs.", async () => {
+        const health = await loadRuntimeHealth();
+        await electron_1.ipcRenderer.invoke("codexpp:reveal", health?.paths.logDir ?? "<user dir>/log");
+    }), "maintenance:open-logs"));
+    maintenanceCard.appendChild(copyCommandRow("Copy status command", "Machine-readable install status.", "codex-plusplus status --json"));
+    maintenanceCard.appendChild(copyCommandRow("Copy support bundle command", "Redacted support diagnostics.", "codex-plusplus support bundle"));
+    maintenanceCard.appendChild(copyCommandRow("Copy uninstall command", "Run after quitting Codex to restore the app backup.", "codex-plusplus uninstall"));
     maintenanceCard.appendChild(reportBugRow());
     maintenance.appendChild(maintenanceCard);
     sectionsWrap.appendChild(maintenance);
+}
+function renderInstallHealth(sectionsWrap) {
+    const section = document.createElement("section");
+    section.className = "flex flex-col gap-2";
+    section.appendChild(sectionTitle("Install Health"));
+    const card = roundedCard();
+    card.appendChild(loadingRow("Loading runtime health", "Checking runtime paths and reload status."));
+    section.appendChild(card);
+    sectionsWrap.appendChild(section);
+    void loadRuntimeHealth()
+        .then((health) => {
+        card.textContent = "";
+        if (!health) {
+            card.appendChild(errorRow("Runtime health unavailable", "Codex++ could not read runtime diagnostics from the main process."));
+            return;
+        }
+        const reload = health.lastReload
+            ? `${health.lastReload.ok ? "Last reload succeeded" : "Last reload failed"} ${formatDate(health.lastReload.at)}`
+            : "No reload has run this session.";
+        const unhealthy = health.recentErrors.length > 0 || health.lastReload?.ok === false;
+        card.appendChild(noticeRow(unhealthy ? "Needs Attention" : "Healthy", unhealthy
+            ? "Recent runtime errors were recorded. Open logs or create a support bundle if behavior looks wrong."
+            : "Runtime diagnostics look healthy.", unhealthy ? "warn" : "success"));
+        card.appendChild(rowSimple("Runtime", `v${health.version}; ${reload}`));
+        card.appendChild(rowSimple("Tweaks directory", health.paths.tweaksDir));
+        card.appendChild(rowSimple("Log directory", health.paths.logDir));
+        card.appendChild(rowSimple("Loaded tweaks", `Discovered ${health.tweaks.discovered}; main loaded ${health.tweaks.loadedMain}; renderer loaded ${health.tweaks.loadedRenderer ?? "unknown"}.`));
+        if (health.recentErrors.length > 0) {
+            const latest = health.recentErrors[health.recentErrors.length - 1];
+            card.appendChild(errorRow("Most recent runtime issue", `${formatDate(latest.at)}: ${latest.message}`));
+        }
+    })
+        .catch((e) => {
+        card.textContent = "";
+        card.appendChild(errorRow("Could not load runtime health", String(e)));
+    });
 }
 function renderCodexPlusPlusConfig(card, config) {
     card.appendChild(autoUpdateRow(config));
@@ -622,26 +677,27 @@ function checkForUpdatesRow(check) {
             void electron_1.ipcRenderer.invoke("codexpp:open-external", check.releaseUrl);
         }));
     }
-    actions.appendChild(compactButton("Check Now", () => {
-        row.style.opacity = "0.65";
-        void electron_1.ipcRenderer
-            .invoke("codexpp:check-codexpp-update", true)
-            .then((next) => {
+    actions.appendChild(actionButton("Check Now", "Check for Codex++ updates", async (btn) => {
+        setButtonPending(btn, true, "Checking");
+        try {
+            const next = await electron_1.ipcRenderer.invoke("codexpp:check-codexpp-update", true);
             const card = row.parentElement;
             if (!card)
                 return;
             card.textContent = "";
-            void electron_1.ipcRenderer.invoke("codexpp:get-config").then((config) => {
-                renderCodexPlusPlusConfig(card, {
-                    ...config,
-                    updateCheck: next,
-                });
+            const config = await electron_1.ipcRenderer.invoke("codexpp:get-config");
+            renderCodexPlusPlusConfig(card, {
+                ...config,
+                updateCheck: next,
             });
-        })
-            .catch((e) => plog("Codex++ update check failed", String(e)))
-            .finally(() => {
-            row.style.opacity = "";
-        });
+        }
+        catch (e) {
+            plog("Codex++ update check failed", String(e));
+            row.insertAdjacentElement("afterend", errorRow("Update check failed", String(e)));
+        }
+        finally {
+            setButtonPending(btn, false);
+        }
     }));
     row.appendChild(actions);
     return row;
@@ -669,20 +725,8 @@ function updateSummary(check) {
         return `${latest}${checked} ${check.error}`;
     return `${latest}${checked}`;
 }
-function uninstallRow() {
-    const row = actionRow("Uninstall Codex++", "Copies the uninstall command. Run it from a terminal after quitting Codex.");
-    const action = row.querySelector("[data-codexpp-row-actions]");
-    action?.appendChild(compactButton("Copy Command", () => {
-        void electron_1.ipcRenderer
-            .invoke("codexpp:copy-text", "node ~/.codex-plusplus/source/packages/installer/dist/cli.js uninstall")
-            .catch((e) => plog("copy uninstall command failed", String(e)));
-    }));
-    return row;
-}
 function reportBugRow() {
-    const row = actionRow("Report a bug", "Open a GitHub issue with runtime, installer, or tweak-manager details.");
-    const action = row.querySelector("[data-codexpp-row-actions]");
-    action?.appendChild(compactButton("Open Issue", () => {
+    return maintenanceActionRow("Report a bug", "Open a GitHub issue with runtime, installer, or tweak-manager details.", "Open Issue", () => {
         const title = encodeURIComponent("[Bug]: ");
         const body = encodeURIComponent([
             "## What happened?",
@@ -695,14 +739,13 @@ function reportBugRow() {
             "- Codex app version: ",
             "- OS: ",
             "",
-            "## Logs",
-            "Attach relevant lines from the Codex++ log directory.",
+            "## Diagnostics",
+            "Run `codex-plusplus support bundle` and attach relevant redacted output.",
         ].join("\n"));
         void electron_1.ipcRenderer.invoke("codexpp:open-external", `https://github.com/b-nnett/codex-plusplus/issues/new?title=${title}&body=${body}`);
-    }));
-    return row;
+    });
 }
-function actionRow(titleText, description) {
+function maintenanceActionRow(titleText, description, actionLabel, onAction, feedbackKey) {
     const row = document.createElement("div");
     row.className = "flex items-center justify-between gap-4 p-3";
     const left = document.createElement("div");
@@ -715,53 +758,24 @@ function actionRow(titleText, description) {
     desc.textContent = description;
     left.appendChild(title);
     left.appendChild(desc);
+    const feedback = feedbackKey ? state.feedback.get(feedbackKey) : null;
+    if (feedback)
+        left.appendChild(inlineFeedback(feedback.kind, feedback.message));
     row.appendChild(left);
     const actions = document.createElement("div");
     actions.dataset.codexppRowActions = "true";
     actions.className = "flex shrink-0 items-center gap-2";
+    actions.appendChild(compactButton(actionLabel, onAction));
     row.appendChild(actions);
     return row;
 }
+function copyCommandRow(title, description, command) {
+    const key = `copy:${command}`;
+    return maintenanceActionRow(title, `${description} ${command}`, "Copy", () => {
+        void invokeAction(key, "Copying command", "Command copied.", () => electron_1.ipcRenderer.invoke("codexpp:copy-text", command));
+    }, key);
+}
 function renderTweaksPage(sectionsWrap) {
-    const openBtn = openInPlaceButton("Open Tweaks Folder", () => {
-        void electron_1.ipcRenderer.invoke("codexpp:reveal", tweaksPath());
-    });
-    const reloadBtn = openInPlaceButton("Force Reload", () => {
-        // Full page refresh — same as DevTools Cmd-R / our CDP Page.reload.
-        // Main re-discovers tweaks first so the new renderer comes up with a
-        // fresh tweak set; then location.reload restarts the renderer so the
-        // preload re-initializes against it.
-        void electron_1.ipcRenderer
-            .invoke("codexpp:reload-tweaks")
-            .catch((e) => plog("force reload (main) failed", String(e)))
-            .finally(() => {
-            location.reload();
-        });
-    });
-    // Drop the diagonal-arrow icon from the reload button — it implies "open
-    // out of app" which doesn't fit. Replace its trailing svg with a refresh.
-    const reloadSvg = reloadBtn.querySelector("svg");
-    if (reloadSvg) {
-        reloadSvg.outerHTML =
-            `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-2xs" aria-hidden="true">` +
-                `<path d="M4 10a6 6 0 0 1 10.24-4.24L16 7.5M16 4v3.5h-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>` +
-                `<path d="M16 10a6 6 0 0 1-10.24 4.24L4 12.5M4 16v-3.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>` +
-                `</svg>`;
-    }
-    const trailing = document.createElement("div");
-    trailing.className = "flex items-center gap-2";
-    trailing.appendChild(reloadBtn);
-    trailing.appendChild(openBtn);
-    if (state.listedTweaks.length === 0) {
-        const section = document.createElement("section");
-        section.className = "flex flex-col gap-2";
-        section.appendChild(sectionTitle("Installed Tweaks", trailing));
-        const card = roundedCard();
-        card.appendChild(rowSimple("No tweaks installed", `Drop a tweak folder into ${tweaksPath()} and reload.`));
-        section.appendChild(card);
-        sectionsWrap.appendChild(section);
-        return;
-    }
     // Group registered SettingsSections by tweak id (prefix split at ":").
     const sectionsByTweak = new Map();
     for (const s of state.sections.values()) {
@@ -771,17 +785,122 @@ function renderTweaksPage(sectionsWrap) {
         sectionsByTweak.get(tweakId).push(s);
     }
     const wrap = document.createElement("section");
-    wrap.className = "flex flex-col gap-2";
-    wrap.appendChild(sectionTitle("Installed Tweaks", trailing));
-    const card = roundedCard();
-    for (const t of state.listedTweaks) {
-        card.appendChild(tweakRow(t, sectionsByTweak.get(t.manifest.id) ?? []));
+    wrap.className = "flex flex-col gap-3";
+    wrap.appendChild(sectionTitle("Installed Tweaks"));
+    wrap.appendChild(tweaksToolbar());
+    const globalFeedback = state.feedback.get("tweaks:global");
+    if (globalFeedback)
+        wrap.appendChild(noticeRow("Tweaks", globalFeedback.message, globalFeedback.kind));
+    if (state.listedTweaks.length === 0) {
+        wrap.appendChild(emptyState("No tweaks installed", `Drop a tweak folder into ${tweaksPath()} and reload.`));
+        sectionsWrap.appendChild(wrap);
+        return;
     }
-    wrap.appendChild(card);
+    const visible = filteredTweaks(state.listedTweaks);
+    if (visible.length === 0) {
+        wrap.appendChild(emptyState("No tweaks match", "Try a different search or filter."));
+        sectionsWrap.appendChild(wrap);
+        return;
+    }
+    for (const group of tweakGroups(visible)) {
+        if (group.items.length === 0)
+            continue;
+        const section = document.createElement("section");
+        section.className = "flex flex-col gap-2";
+        section.appendChild(sectionTitle(`${group.title} (${group.items.length})`));
+        const card = roundedCard();
+        for (const t of group.items) {
+            card.appendChild(tweakRow(t, sectionsByTweak.get(t.manifest.id) ?? []));
+        }
+        section.appendChild(card);
+        wrap.appendChild(section);
+    }
     sectionsWrap.appendChild(wrap);
+}
+function tweaksToolbar() {
+    const toolbar = document.createElement("div");
+    toolbar.className = "flex flex-wrap items-center gap-2";
+    toolbar.setAttribute("role", "toolbar");
+    toolbar.setAttribute("aria-label", "Tweak manager controls");
+    const search = document.createElement("input");
+    search.type = "search";
+    search.value = state.tweaksSearch;
+    search.placeholder = "Search tweaks";
+    search.setAttribute("aria-label", "Search tweaks");
+    search.className =
+        "border-token-border h-8 min-w-48 flex-1 rounded-lg border bg-transparent px-2 text-sm text-token-text-primary outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border";
+    search.addEventListener("input", () => {
+        state.tweaksSearch = search.value;
+        rerender();
+    });
+    toolbar.appendChild(search);
+    toolbar.appendChild(filterSegmentedControl());
+    toolbar.appendChild(iconButton("Reload tweaks", refreshIconSvg(), async (btn) => {
+        setButtonPending(btn, true, "Reloading");
+        state.feedback.set("tweaks:global", { kind: "info", message: "Reloading tweaks..." });
+        rerender();
+        try {
+            await electron_1.ipcRenderer.invoke("codexpp:reload-tweaks");
+            state.feedback.set("tweaks:global", { kind: "success", message: "Tweaks reloaded. Reloading window..." });
+            rerender();
+            location.reload();
+        }
+        catch (e) {
+            state.feedback.set("tweaks:global", { kind: "error", message: `Reload failed: ${String(e)}` });
+            rerender();
+        }
+        finally {
+            setButtonPending(btn, false);
+        }
+    }));
+    toolbar.appendChild(iconButton("Open tweaks folder", folderIconSvg(), async (btn) => {
+        setButtonPending(btn, true, "Opening");
+        try {
+            await electron_1.ipcRenderer.invoke("codexpp:reveal", tweaksPath());
+            state.feedback.set("tweaks:global", { kind: "success", message: "Opened tweaks folder." });
+        }
+        catch (e) {
+            state.feedback.set("tweaks:global", { kind: "error", message: `Could not open tweaks folder: ${String(e)}` });
+        }
+        finally {
+            setButtonPending(btn, false);
+            rerender();
+        }
+    }));
+    return toolbar;
+}
+function filterSegmentedControl() {
+    const wrap = document.createElement("div");
+    wrap.className = "border-token-border inline-flex h-8 overflow-hidden rounded-lg border";
+    wrap.setAttribute("role", "group");
+    wrap.setAttribute("aria-label", "Filter tweaks by status");
+    const options = [
+        ["all", "All"],
+        ["attention", "Attention"],
+        ["updates", "Updates"],
+        ["enabled", "Enabled"],
+        ["disabled", "Disabled"],
+    ];
+    for (const [value, label] of options) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.dataset.codexppFilter = value;
+        btn.className =
+            "h-8 px-2 text-xs text-token-text-secondary hover:bg-token-list-hover-background aria-pressed:bg-token-list-hover-background aria-pressed:text-token-text-primary";
+        btn.setAttribute("aria-pressed", String(state.tweaksFilter === value));
+        btn.textContent = label;
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            state.tweaksFilter = value;
+            rerender();
+        });
+        wrap.appendChild(btn);
+    }
+    return wrap;
 }
 function tweakRow(t, sections) {
     const m = t.manifest;
+    const needsMainWarning = hasMainProcessAccess(t);
     // Outer cell wraps the header row + (optional) nested sections so the
     // parent card's divider stays between *tweaks*, not between header and
     // body of the same tweak.
@@ -851,18 +970,13 @@ function tweakRow(t, sections) {
         titleRow.appendChild(ver);
     }
     if (t.update?.updateAvailable) {
-        const badge = document.createElement("span");
-        badge.className =
-            "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] font-medium text-token-text-primary";
-        badge.textContent = "Update Available";
-        titleRow.appendChild(badge);
+        titleRow.appendChild(statusBadge("Update Available", "info"));
     }
     if (!t.loadable) {
-        const badge = document.createElement("span");
-        badge.className =
-            "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] font-medium text-token-text-secondary";
-        badge.textContent = "Not Loaded";
-        titleRow.appendChild(badge);
+        titleRow.appendChild(statusBadge("Not Loaded", "warn"));
+    }
+    if (needsMainWarning) {
+        titleRow.appendChild(statusBadge("Main Process Access", "danger"));
     }
     stack.appendChild(titleRow);
     if (t.loadError) {
@@ -922,33 +1036,68 @@ function tweakRow(t, sections) {
         }
         stack.appendChild(tagsRow);
     }
-    if (t.capabilities && t.capabilities.length > 0) {
+    if (needsMainWarning) {
+        const warn = document.createElement("div");
+        warn.className = "text-token-text-secondary min-w-0 text-xs";
+        warn.textContent = "Can run in Codex's main process. Enable only tweaks from sources you trust.";
+        stack.appendChild(warn);
+    }
+    const friendlyCapabilities = friendlyCapabilityLabels(t.capabilities ?? []);
+    if (friendlyCapabilities.length > 0) {
         const capRow = document.createElement("div");
         capRow.className = "flex flex-wrap items-center gap-1 pt-0.5";
-        for (const cap of t.capabilities) {
-            const pill = document.createElement("span");
-            pill.className =
-                "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] text-token-description-foreground";
-            pill.textContent = cap;
-            capRow.appendChild(pill);
-        }
+        for (const cap of friendlyCapabilities)
+            capRow.appendChild(statusBadge(cap, "muted"));
         stack.appendChild(capRow);
     }
+    const feedback = state.feedback.get(`tweak:${m.id}`);
+    if (feedback)
+        stack.appendChild(inlineFeedback(feedback.kind, feedback.message));
     left.appendChild(stack);
     header.appendChild(left);
     // ── Toggle ────────────────────────────────────────────────────────────
     const right = document.createElement("div");
     right.className = "flex shrink-0 items-center gap-2 pt-0.5";
     if (t.update?.updateAvailable && t.update.releaseUrl) {
-        right.appendChild(compactButton("Review Release", () => {
+        right.appendChild(compactButton("View Release", () => {
             void electron_1.ipcRenderer.invoke("codexpp:open-external", t.update.releaseUrl);
         }));
     }
-    right.appendChild(switchControl(t.enabled, async (next) => {
-        await electron_1.ipcRenderer.invoke("codexpp:set-tweak-enabled", m.id, next);
-        // The main process broadcasts a reload which will re-fetch the list
-        // and re-render. We don't optimistically toggle to avoid drift.
-    }));
+    const toggle = switchControl(t.enabled, async (next) => {
+        if (next && needsMainWarning && !state.confirmedMainTweaks.has(m.id)) {
+            const ok = window.confirm(`${m.name} can run in Codex's main process.\n\nOnly enable main-process tweaks from sources you trust.`);
+            if (!ok)
+                return false;
+            state.confirmedMainTweaks.add(m.id);
+        }
+        state.feedback.set(`tweak:${m.id}`, {
+            kind: "info",
+            message: next ? "Enabling..." : "Disabling...",
+        });
+        rerender();
+        try {
+            await electron_1.ipcRenderer.invoke("codexpp:set-tweak-enabled", m.id, next);
+            state.listedTweaks = state.listedTweaks.map((item) => item.manifest.id === m.id ? { ...item, enabled: next } : item);
+            state.feedback.set(`tweak:${m.id}`, {
+                kind: "success",
+                message: next ? "Enabled. Reloading tweaks..." : "Disabled. Reloading tweaks...",
+            });
+            rerender();
+            return true;
+        }
+        catch (e) {
+            state.feedback.set(`tweak:${m.id}`, {
+                kind: "error",
+                message: `Could not ${next ? "enable" : "disable"}: ${String(e)}`,
+            });
+            rerender();
+            return false;
+        }
+    }, {
+        disabled: !t.loadable || !t.entryExists,
+        ariaLabel: `${t.enabled ? "Disable" : "Enable"} ${m.name}`,
+    });
+    right.appendChild(toggle);
     header.appendChild(right);
     cell.appendChild(header);
     // If the tweak is enabled and registered settings sections, render those
@@ -964,7 +1113,7 @@ function tweakRow(t, sections) {
                 s.render(body);
             }
             catch (e) {
-                body.textContent = `Error rendering tweak section: ${e.message}`;
+                body.appendChild(errorRow("Error rendering tweak section", e.message));
             }
             nested.appendChild(body);
         }
@@ -997,6 +1146,90 @@ function renderAuthor(author) {
         wrap.appendChild(span);
     }
     return wrap;
+}
+function filteredTweaks(tweaks) {
+    const q = state.tweaksSearch.trim().toLowerCase();
+    return tweaks.filter((t) => {
+        const haystack = [
+            t.manifest.name,
+            t.manifest.id,
+            t.manifest.description,
+            t.manifest.githubRepo,
+            ...(t.manifest.tags ?? []),
+            ...friendlyCapabilityLabels(t.capabilities ?? []),
+            t.loadError,
+        ].filter(Boolean).join(" ").toLowerCase();
+        if (q && !haystack.includes(q))
+            return false;
+        switch (state.tweaksFilter) {
+            case "attention": return isAttentionTweak(t);
+            case "updates": return !!t.update?.updateAvailable;
+            case "enabled": return t.enabled && t.loadable;
+            case "disabled": return !t.enabled;
+            default: return true;
+        }
+    });
+}
+function tweakGroups(tweaks) {
+    const seen = new Set();
+    const take = (predicate) => {
+        const out = [];
+        for (const tweak of tweaks) {
+            if (seen.has(tweak.manifest.id))
+                continue;
+            if (!predicate(tweak))
+                continue;
+            seen.add(tweak.manifest.id);
+            out.push(tweak);
+        }
+        return out;
+    };
+    return [
+        { title: "Needs Attention", items: take(isAttentionTweak) },
+        { title: "Updates Available", items: take((t) => !!t.update?.updateAvailable) },
+        { title: "Enabled", items: take((t) => t.enabled) },
+        { title: "Disabled", items: take((t) => !t.enabled) },
+    ];
+}
+function isAttentionTweak(t) {
+    return !t.loadable || !t.entryExists || !!t.loadError;
+}
+function hasMainProcessAccess(t) {
+    return (t.capabilities ?? []).some((c) => {
+        const normalized = c.toLowerCase();
+        return normalized === "main process" || normalized === "main process access";
+    });
+}
+function friendlyCapabilityLabels(capabilities) {
+    const map = {
+        "renderer ui": "Renderer UI",
+        "main process": "Main Process Access",
+        "isolated storage": "Local Data Storage",
+        "scoped ipc": "Scoped IPC",
+        "custom entry": "Custom Entry",
+        "runtime gate": "Runtime Requirement",
+    };
+    const labels = capabilities.map((c) => map[c.toLowerCase()] ?? c);
+    return [...new Set(labels)];
+}
+function formatDate(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+async function loadRuntimeHealth() {
+    return (await electron_1.ipcRenderer.invoke("codexpp:runtime-health").catch(() => null));
+}
+async function invokeAction(key, pending, success, action) {
+    state.feedback.set(key, { kind: "info", message: pending });
+    rerender();
+    try {
+        await action();
+        state.feedback.set(key, { kind: "success", message: success });
+    }
+    catch (e) {
+        state.feedback.set(key, { kind: "error", message: String(e) });
+    }
+    rerender();
 }
 // ───────────────────────────────────────────────────────────── components ──
 /** The full panel shell (toolbar + scroll + heading + sections wrap). */
@@ -1054,6 +1287,53 @@ function sectionTitle(text, trailing) {
     }
     return titleRow;
 }
+function statusBadge(label, kind = "muted") {
+    const badge = document.createElement("span");
+    const tone = kind === "danger" ? "text-token-charts-red"
+        : kind === "warn" ? "text-token-text-primary"
+            : kind === "success" ? "text-token-charts-green"
+                : kind === "info" ? "text-token-text-primary"
+                    : "text-token-description-foreground";
+    badge.className =
+        `rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] font-medium ${tone}`;
+    badge.textContent = label;
+    return badge;
+}
+function noticeRow(titleText, description, kind = "info") {
+    const row = document.createElement("div");
+    row.className = "flex flex-col gap-1 p-3";
+    const title = document.createElement("div");
+    title.className =
+        kind === "error" ? "text-sm font-medium text-token-charts-red"
+            : kind === "success" ? "text-sm font-medium text-token-charts-green"
+                : "text-sm font-medium text-token-text-primary";
+    title.textContent = titleText;
+    const desc = document.createElement("div");
+    desc.className = "text-token-text-secondary text-sm";
+    desc.textContent = description;
+    row.append(title, desc);
+    return row;
+}
+function loadingRow(title, description) {
+    return rowSimple(title, description);
+}
+function errorRow(title, description) {
+    return noticeRow(title, description, "error");
+}
+function emptyState(title, description) {
+    const card = roundedCard();
+    card.appendChild(rowSimple(title, description));
+    return card;
+}
+function inlineFeedback(kind, message) {
+    const el = document.createElement("div");
+    el.className =
+        kind === "error" ? "text-xs text-token-charts-red"
+            : kind === "success" ? "text-xs text-token-charts-green"
+                : "text-xs text-token-text-secondary";
+    el.textContent = message;
+    return el;
+}
 /**
  * Codex's "Open config.toml"-style trailing button: ghost border, muted
  * label, top-right diagonal arrow icon. Markup mirrors Configuration panel.
@@ -1076,17 +1356,38 @@ function openInPlaceButton(label, onClick) {
     return btn;
 }
 function compactButton(label, onClick) {
+    return actionButton(label, label, (_btn) => {
+        onClick();
+    });
+}
+function actionButton(label, ariaLabel, onClick) {
     const btn = document.createElement("button");
     btn.type = "button";
+    btn.setAttribute("aria-label", ariaLabel);
     btn.className =
         "border-token-border user-select-none no-drag cursor-interaction inline-flex h-8 items-center whitespace-nowrap rounded-lg border px-2 text-sm text-token-text-primary enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
     btn.textContent = label;
-    btn.addEventListener("click", (e) => {
+    btn.dataset.codexppLabel = label;
+    btn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        onClick();
+        await onClick(btn);
     });
     return btn;
+}
+function iconButton(label, iconSvg, onClick) {
+    const btn = actionButton("", label, onClick);
+    btn.className =
+        "border-token-border user-select-none no-drag cursor-interaction inline-flex h-8 w-8 items-center justify-center rounded-lg border text-token-text-primary enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
+    btn.innerHTML = iconSvg;
+    btn.dataset.codexppLabel = "";
+    return btn;
+}
+function setButtonPending(btn, pending, label = "Working") {
+    btn.disabled = pending;
+    if (btn.dataset.codexppLabel) {
+        btn.textContent = pending ? label : btn.dataset.codexppLabel;
+    }
 }
 function roundedCard() {
     const card = document.createElement("div");
@@ -1122,10 +1423,12 @@ function rowSimple(title, description) {
  * Codex-styled toggle switch. Markup mirrors the General > Permissions row
  * switch we captured: outer button (role=switch), inner pill, sliding knob.
  */
-function switchControl(initial, onChange) {
+function switchControl(initial, onChange, opts = {}) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute("role", "switch");
+    if (opts.ariaLabel)
+        btn.setAttribute("aria-label", opts.ariaLabel);
     const pill = document.createElement("span");
     const knob = document.createElement("span");
     knob.className =
@@ -1142,18 +1445,27 @@ function switchControl(initial, onChange) {
         knob.style.transform = on ? "translateX(14px)" : "translateX(2px)";
     };
     apply(initial);
+    btn.disabled = opts.disabled === true;
     btn.appendChild(pill);
     btn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (btn.disabled)
+            return;
         const next = btn.getAttribute("aria-checked") !== "true";
         apply(next);
         btn.disabled = true;
         try {
-            await onChange(next);
+            const result = await onChange(next);
+            if (result === false)
+                apply(!next);
+        }
+        catch (err) {
+            apply(!next);
+            console.warn("[codex-plusplus] switch action failed", err);
         }
         finally {
-            btn.disabled = false;
+            btn.disabled = opts.disabled === true;
         }
     });
     return btn;
@@ -1187,6 +1499,17 @@ function defaultPageIconSvg() {
         `<path d="M5 3h7l3 3v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>` +
         `<path d="M12 3v3a1 1 0 0 0 1 1h2" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>` +
         `<path d="M7 11h6M7 14h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>` +
+        `</svg>`);
+}
+function refreshIconSvg() {
+    return (`<svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+        `<path d="M4 10a6 6 0 0 1 10.24-4.24L16 7.5M16 4v3.5h-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>` +
+        `<path d="M16 10a6 6 0 0 1-10.24 4.24L4 12.5M4 16v-3.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>` +
+        `</svg>`);
+}
+function folderIconSvg() {
+    return (`<svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+        `<path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H8l1.5 1.8H14.5A2.5 2.5 0 0 1 17 8.3v5.2A2.5 2.5 0 0 1 14.5 16h-9A2.5 2.5 0 0 1 3 13.5v-7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>` +
         `</svg>`);
 }
 async function resolveIconUrl(url, tweakDir) {

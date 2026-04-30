@@ -6,6 +6,16 @@ This project uses semver for the installer, runtime, SDK, and published CLI pack
 
 ## Unreleased
 
+- Phase 4 UI/UX pass:
+  - Redesigned the in-app Tweaks page with grouped status sections, search,
+    status filters, disabled unavailable toggles, and inline async feedback.
+  - Redesigned Config as the support hub with install health, runtime paths,
+    recent error visibility, and copyable maintenance commands.
+  - Replaced raw capability chips with friendlier trust labels and added
+    once-per-session confirmation before enabling main-process-capable tweaks.
+  - Retired the older duplicate manager section from normal startup.
+  - Expanded DOM fixture coverage for grouped tweak states, async errors,
+    Config health, registered page render failures, and remount behavior.
 - Phase 3 release-readiness pass:
   - Added Windows `install.ps1` bootstrap and documented Windows manual
     `--app` fallback.

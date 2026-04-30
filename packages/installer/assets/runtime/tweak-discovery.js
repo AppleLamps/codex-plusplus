@@ -78,15 +78,15 @@ function resolveEntry(dir, m) {
 }
 function manifestCapabilities(manifest) {
     const scope = manifest.scope ?? "both";
-    const caps = ["isolated storage", "scoped IPC"];
+    const caps = ["Local Data Storage", "Scoped IPC"];
     if (scope === "main" || scope === "both")
-        caps.unshift("main process");
+        caps.unshift("Main Process Access");
     if (scope === "renderer" || scope === "both")
-        caps.unshift("renderer UI");
+        caps.unshift("Renderer UI");
     if (manifest.main)
-        caps.push("custom entry");
+        caps.push("Custom Entry");
     if (manifest.minRuntime)
-        caps.push("runtime gate");
+        caps.push("Runtime Requirement");
     return caps;
 }
 //# sourceMappingURL=tweak-discovery.js.map

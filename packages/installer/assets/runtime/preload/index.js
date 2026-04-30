@@ -14,7 +14,6 @@ const electron_1 = require("electron");
 const react_hook_1 = require("./react-hook");
 const settings_injector_1 = require("./settings-injector");
 const tweak_host_1 = require("./tweak-host");
-const manager_1 = require("./manager");
 // File-log preload progress so we can diagnose without DevTools. Best-effort:
 // failures here must never throw because we'd take the page down with us.
 //
@@ -63,8 +62,6 @@ async function boot() {
         fileLog("settings injector started");
         await (0, tweak_host_1.startTweakHost)();
         fileLog("tweak host started");
-        await (0, manager_1.mountManager)();
-        fileLog("manager mounted");
         subscribeReload();
         fileLog("boot complete");
     }
@@ -85,7 +82,6 @@ function subscribeReload() {
                 console.info("[codex-plusplus] hot-reloading tweaks");
                 await (0, tweak_host_1.teardownTweakHost)();
                 await (0, tweak_host_1.startTweakHost)();
-                await (0, manager_1.mountManager)();
             }
             catch (e) {
                 console.error("[codex-plusplus] hot reload failed:", e);

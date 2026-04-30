@@ -142,11 +142,11 @@ function manifestCapabilities(manifest: ManifestLike): string[] {
   const scope = manifest.scope === "renderer" || manifest.scope === "main" || manifest.scope === "both"
     ? manifest.scope
     : "both";
-  const caps = ["isolated storage", "scoped IPC"];
-  if (scope === "main" || scope === "both") caps.unshift("main process");
-  if (scope === "renderer" || scope === "both") caps.unshift("renderer UI");
-  if (typeof manifest.main === "string") caps.push("custom entry");
-  if (typeof manifest.minRuntime === "string") caps.push("runtime gate");
+  const caps = ["Local Data Storage", "Scoped IPC"];
+  if (scope === "main" || scope === "both") caps.unshift("Main Process Access");
+  if (scope === "renderer" || scope === "both") caps.unshift("Renderer UI");
+  if (typeof manifest.main === "string") caps.push("Custom Entry");
+  if (typeof manifest.minRuntime === "string") caps.push("Runtime Requirement");
   return caps;
 }
 

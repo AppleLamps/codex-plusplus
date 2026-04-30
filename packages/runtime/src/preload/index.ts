@@ -13,7 +13,6 @@ import { ipcRenderer } from "electron";
 import { installReactHook } from "./react-hook";
 import { startSettingsInjector } from "./settings-injector";
 import { startTweakHost, teardownTweakHost } from "./tweak-host";
-import { mountManager } from "./manager";
 
 // File-log preload progress so we can diagnose without DevTools. Best-effort:
 // failures here must never throw because we'd take the page down with us.
@@ -64,8 +63,6 @@ async function boot() {
     fileLog("settings injector started");
     await startTweakHost();
     fileLog("tweak host started");
-    await mountManager();
-    fileLog("manager mounted");
     subscribeReload();
     fileLog("boot complete");
   } catch (e) {
@@ -85,7 +82,6 @@ function subscribeReload(): void {
         console.info("[codex-plusplus] hot-reloading tweaks");
         await teardownTweakHost();
         await startTweakHost();
-        await mountManager();
       } catch (e) {
         console.error("[codex-plusplus] hot reload failed:", e);
       } finally {

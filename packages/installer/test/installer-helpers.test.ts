@@ -97,7 +97,7 @@ test("listLocalTweaks reports valid, missing, invalid, and incompatible tweaks",
     assert.equal(byId.get("missing-manifest"), "missing-manifest");
     assert.equal(byId.get("bad-json"), "invalid");
     assert.equal(byId.get("future"), "incompatible");
-    assert.deepEqual(valid?.capabilities.slice(0, 2), ["renderer UI", "main process"]);
+    assert.deepEqual(valid?.capabilities.slice(0, 2), ["Renderer UI", "Main Process Access"]);
   } finally {
     cleanup(root);
   }

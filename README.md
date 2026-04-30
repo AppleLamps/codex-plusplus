@@ -112,9 +112,20 @@ Codex++ does **not** auto-update tweaks. The manager links to the GitHub release
 Tweaks can declare `minRuntime`; incompatible tweaks stay visible in Settings
 and `tweaks list`, but are not started.
 
-The manager and `tweaks list` also show a computed capability summary such as
-renderer UI, main process, scoped IPC, isolated storage, custom entry, and
-runtime gate. This is informational trust metadata, not a new sandbox.
+## Using the Tweak Manager
+
+Open Codex Settings, then use the Codex Plus Plus sidebar group:
+
+- **Tweaks** groups installed tweaks by Needs Attention, Updates Available,
+  Enabled, and Disabled. Search and filter controls help with larger tweak sets.
+- Non-loadable tweaks stay visible with their reason, but their enable toggle is
+  disabled.
+- Capability labels use friendly names such as Renderer UI, Main Process
+  Access, Local Data Storage, Custom Entry, and Runtime Requirement. These are
+  trust hints, not a new sandbox.
+- Enabling a main-process-capable tweak asks for confirmation once per session.
+- **Config** shows update controls, install health, paths, recent runtime
+  issues, and support actions such as copying `codex-plusplus support bundle`.
 
 See [`SECURITY.md`](./SECURITY.md) for the security model and reporting policy.
 

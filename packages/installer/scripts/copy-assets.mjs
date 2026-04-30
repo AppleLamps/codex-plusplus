@@ -1,6 +1,6 @@
-// Copies the loader stub + bundled runtime/manager into installer/assets/
+// Copies the loader stub + bundled runtime into installer/assets/
 // so the published npm package can extract them at install time.
-import { cpSync, mkdirSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +21,8 @@ for (const [from, to] of copies) {
     console.warn(`[copy-assets] skip (missing): ${from}`);
     continue;
   }
-  cpSync(src, resolve(out, to), { recursive: true });
+  const dest = resolve(out, to);
+  rmSync(dest, { recursive: true, force: true });
+  cpSync(src, dest, { recursive: true });
   console.log(`[copy-assets] ${from} -> assets/${to}`);
 }

@@ -5,7 +5,7 @@
   "main": "dist/main.js",
   "description": "In-app runtime: discovers tweaks, injects settings UI, hot-reloads.",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node ./scripts/bundle-renderer.mjs",
+    "build": "node ./scripts/clean-dist.mjs && tsc -p tsconfig.json && node ./scripts/bundle-renderer.mjs",
     "test": "node --test --import tsx \"test/**/*.test.ts\""
   },
   "dependencies": {

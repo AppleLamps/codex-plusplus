@@ -24,3 +24,16 @@ Before updating a tweak, review the release notes, changed files, repository own
 ## Runtime Boundaries
 
 Renderer tweaks run in the preload context and can modify the Codex UI. Main-process tweaks can use the main-process API exposed by Codex++. Install only tweaks from sources you trust.
+
+Codex++ surfaces capability labels in Settings and `tweaks list` to make that
+trust decision easier:
+
+- Renderer UI: can affect Codex's renderer/preload UI.
+- Main Process Access: can run in Electron's main process and is more powerful.
+- Local Data Storage: can read/write its own Codex++ data directory.
+- Custom Entry: uses a non-default manifest entry file.
+- Runtime Requirement: declares a minimum Codex++ runtime.
+
+These labels are informational. They do not add OS-level sandboxing or make
+unreviewed tweak code safe. The UI asks once per session before enabling a
+main-process-capable tweak as a reminder to review the source.

@@ -69,13 +69,13 @@ The installer seeds the default tweak set from external GitHub release tarballs 
    - For each renderer-scoped tweak, asks main to read the entry source from
      the sandboxed tweaks directory, evaluates it in the preload context, and
      calls `start(api)`.
-   - Starts the Settings injector (MutationObserver waiting for the Settings dialog).
-   - Mounts the built-in Tweak Manager section.
+   - Starts the Settings injector (MutationObserver waiting for Codex Settings).
 9. When the user opens Settings, our injector:
    - Detects Codex's settings sidebar by matching known native settings item labels.
    - Appends a Codex Plus Plus sidebar group with Config and Tweaks entries.
    - Creates a sibling content panel that shows registered sections, installed
-     tweak status, capability labels, and compact runtime diagnostics.
+     tweak status groups, friendly capability labels, and compact runtime
+     diagnostics. This is the only normal in-app tweak-management surface.
 
 ## Why these choices
 
@@ -111,9 +111,12 @@ Tweak `stop()` may be async. Runtime reloads and app shutdown await teardown,
 flush storage, and clean up main-process IPC registrations before starting the
 next copy of a tweak.
 
-The capability labels shown by `tweaks list` and the manager are computed from
-existing manifest/runtime facts. They are trust hints for users and support
-debugging; they do not enforce additional OS sandboxing.
+The capability labels shown by `tweaks list` and the Settings Tweaks page are
+computed from existing manifest/runtime facts. They use friendly wording such as
+Renderer UI, Main Process Access, Local Data Storage, Custom Entry, and Runtime
+Requirement. They are trust hints for users and support debugging; they do not
+enforce additional OS sandboxing. The renderer asks for once-per-session
+confirmation before enabling a tweak that can run in the main process.
 
 ## Diagnostics
 
