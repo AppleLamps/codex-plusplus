@@ -27,6 +27,9 @@ interface ListedTweak {
     dir: string;
     entryExists: boolean;
     enabled: boolean;
+    loadable: boolean;
+    loadError?: string;
+    capabilities?: string[];
     update: TweakUpdateCheck | null;
 }
 interface TweakUpdateCheck {
@@ -40,6 +43,8 @@ interface TweakUpdateCheck {
     error?: string;
 }
 export declare function startSettingsInjector(): void;
+export declare function __tryInjectForTests(): void;
+export declare function __resetSettingsInjectorForTests(): void;
 export declare function registerSection(section: SettingsSection): SettingsHandle;
 export declare function clearSections(): void;
 /**

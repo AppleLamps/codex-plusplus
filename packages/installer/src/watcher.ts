@@ -180,9 +180,7 @@ function uninstallSystemd(): void {
 
 function installScheduledTask(_appRoot: string): WatcherKind {
   // schtasks.exe creates a logon-trigger task. We pass the repair command via /TR.
-  // Quoting on Windows is delicate; leaving this as a TODO until we can test
-  // on a real Codex install.
-  const repair = `cmd /c ${windowsCommand()}`;
+  const repair = buildWindowsRepairCommand();
   try {
     execFileSync("schtasks.exe", [
       "/Create",
@@ -233,8 +231,15 @@ function xmlEscape(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-function windowsCommand(): string {
-  return `"${process.execPath}" "${currentCliPath()}" repair --quiet`;
+export function buildWindowsRepairCommand(
+  execPath = process.execPath,
+  cliPath = currentCliPath(),
+): string {
+  return `cmd /d /s /c ${windowsCommandArg(execPath)} ${windowsCommandArg(cliPath)} repair --quiet`;
+}
+
+export function windowsCommandArg(value: string): string {
+  return `"${value.replace(/"/g, `""`)}"`;
 }
 
 function uninstallScheduledTask(): void {

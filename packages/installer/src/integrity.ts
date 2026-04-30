@@ -4,11 +4,37 @@
  * JSON-ish blob — we read it from a known location at the package root.
  */
 import { readPlist, writePlist } from "./plist.js";
-import type { CodexInstall } from "./platform.js";
+import type { CodexInstall, Platform } from "./platform.js";
 
 export interface IntegrityEntry {
   algorithm: "SHA256";
   hash: string;
+}
+
+export interface IntegritySupport {
+  supported: boolean;
+  level: "checked" | "skipped";
+  detail: string;
+}
+
+export function describeIntegritySupport(
+  platform: Platform,
+  hasMetaPath: boolean,
+): IntegritySupport {
+  if (platform === "darwin" && hasMetaPath) {
+    return {
+      supported: true,
+      level: "checked",
+      detail: "macOS Info.plist integrity hash is checked",
+    };
+  }
+  return {
+    supported: false,
+    level: "skipped",
+    detail:
+      `${platform} integrity writer is not implemented; ` +
+      "Codex++ relies on disabled embedded asar integrity validation",
+  };
 }
 
 export function getIntegrity(install: CodexInstall): IntegrityEntry | null {

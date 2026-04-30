@@ -10,11 +10,16 @@
 import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TweakManifest } from "@codex-plusplus/sdk";
+import { resolveInside } from "./path-security";
+import { minRuntimeError } from "./version";
 
 export interface DiscoveredTweak {
   dir: string;
   entry: string;
   manifest: TweakManifest;
+  loadable: boolean;
+  loadError?: string;
+  capabilities: string[];
 }
 
 const ENTRY_CANDIDATES = ["index.js", "index.cjs", "index.mjs"];
@@ -36,7 +41,15 @@ export function discoverTweaks(tweaksDir: string): DiscoveredTweak[] {
     if (!isValidManifest(manifest)) continue;
     const entry = resolveEntry(dir, manifest);
     if (!entry) continue;
-    out.push({ dir, entry, manifest });
+    const loadError = minRuntimeError(manifest.minRuntime);
+    out.push({
+      dir,
+      entry,
+      manifest,
+      loadable: !loadError,
+      ...(loadError ? { loadError } : {}),
+      capabilities: manifestCapabilities(manifest),
+    });
   }
   return out;
 }
@@ -50,12 +63,26 @@ function isValidManifest(m: TweakManifest): boolean {
 
 function resolveEntry(dir: string, m: TweakManifest): string | null {
   if (m.main) {
-    const p = join(dir, m.main);
-    return existsSync(p) ? p : null;
+    try {
+      return resolveInside(dir, m.main, { mustExist: true, requireFile: true });
+    } catch {
+      return null;
+    }
   }
   for (const c of ENTRY_CANDIDATES) {
-    const p = join(dir, c);
-    if (existsSync(p)) return p;
+    try {
+      return resolveInside(dir, c, { mustExist: true, requireFile: true });
+    } catch {}
   }
   return null;
+}
+
+function manifestCapabilities(manifest: TweakManifest): string[] {
+  const scope = manifest.scope ?? "both";
+  const caps = ["isolated storage", "scoped IPC"];
+  if (scope === "main" || scope === "both") caps.unshift("main process");
+  if (scope === "renderer" || scope === "both") caps.unshift("renderer UI");
+  if (manifest.main) caps.push("custom entry");
+  if (manifest.minRuntime) caps.push("runtime gate");
+  return caps;
 }

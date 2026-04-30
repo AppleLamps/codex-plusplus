@@ -17,4 +17,4 @@ export declare function startTweakHost(): Promise<void>;
  * re-evaluate fresh source. Module cache isn't relevant since we eval
  * source strings directly — each load creates a fresh scope.
  */
-export declare function teardownTweakHost(): void;
+export declare function teardownTweakHost(): Promise<void>;

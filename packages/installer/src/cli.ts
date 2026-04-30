@@ -6,6 +6,8 @@ import { uninstall } from "./commands/uninstall.js";
 import { repair } from "./commands/repair.js";
 import { status } from "./commands/status.js";
 import { doctor } from "./commands/doctor.js";
+import { supportBundle } from "./commands/support.js";
+import { tweaksList, tweaksOpen } from "./commands/tweaks.js";
 import { CODEX_PLUSPLUS_VERSION } from "./version.js";
 
 function wrap<T extends (...args: never[]) => unknown | Promise<unknown>>(fn: T): T {
@@ -52,12 +54,30 @@ prog
 prog
   .command("status")
   .describe("Show patch status, paths, version")
-  .action(status);
+  .option("--json", "Emit machine-readable JSON")
+  .action(wrap(status));
 
 prog
   .command("doctor")
   .describe("Diagnose common issues (signature, fuses, asar integrity, perms)")
-  .action(doctor);
+  .option("--json", "Emit machine-readable JSON")
+  .action(wrap(doctor));
+
+prog
+  .command("support bundle")
+  .describe("Create a redacted support diagnostics directory")
+  .option("--out", "Directory where the bundle directory should be created")
+  .action(wrap(supportBundle));
+
+prog
+  .command("tweaks list")
+  .describe("List local tweaks and manifest status")
+  .action(wrap(tweaksList));
+
+prog
+  .command("tweaks open")
+  .describe("Open the local tweaks directory")
+  .action(wrap(tweaksOpen));
 
 prog.parse(process.argv, {
   unknown: (flag) => {

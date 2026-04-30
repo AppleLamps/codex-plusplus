@@ -4,6 +4,26 @@ All notable changes to codex-plusplus are documented here.
 
 This project uses semver for the installer, runtime, SDK, and published CLI package. Tweak authors should also use semver release tags so the manager can compare installed and available versions.
 
+## Unreleased
+
+- Phase 3 release-readiness pass:
+  - Added Windows `install.ps1` bootstrap and documented Windows manual
+    `--app` fallback.
+  - Added `doctor --json`, redacted `support bundle`, and release consistency
+    checks through `npm run check`.
+  - Added fake-app installer fixture coverage for asar patching, backup
+    restore, corrupted layouts, and packaged runtime assets.
+  - Added DOM-backed Settings injector tests with `happy-dom`.
+  - Surfaced computed tweak trust/capability labels in the CLI and manager UI.
+- Hardened tweak source, asset, manifest entry, and per-tweak filesystem path
+  containment.
+- Enforced `minRuntime` compatibility and surfaced skipped tweaks in the UI.
+- Awaited async tweak teardown and cleaned up main-process IPC registrations on
+  reload/stop.
+- Added `status --json`, `tweaks list`, and `tweaks open` CLI support helpers.
+- Made installer preflight and integrity messaging platform-aware.
+- Added runtime health diagnostics, focused Node tests, and CI.
+
 ## 0.1.0
 
 - Initial alpha release.

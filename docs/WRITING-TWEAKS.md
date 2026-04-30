@@ -6,7 +6,7 @@ A tweak is a folder containing `manifest.json` and an entry script. Drop it into
 - Linux: `~/.local/share/codex-plusplus/tweaks/`
 - Windows: `%APPDATA%/codex-plusplus/tweaks/`
 
-…then reload Codex (Cmd/Ctrl+R in the window, or restart the app). The Tweak Manager (in Settings → Tweaks) shows everything that loaded.
+…then reload Codex (Cmd/Ctrl+R in the window, or restart the app). The Tweak Manager (in Settings → Tweaks) shows discovered tweaks, including tweaks that were skipped because their manifest is incompatible. It also shows computed capability labels so users can see whether a tweak runs in the renderer, main process, uses a custom entry, or declares a runtime gate. Those labels are informational trust hints, not extra sandbox enforcement.
 
 ## Minimal example
 
@@ -56,9 +56,9 @@ module.exports = {
 | `githubRepo` | yes | GitHub repository in `owner/repo` form. Used for daily release checks. |
 | `author` | no | Free-form. |
 | `description` | no | One-liner shown in the manager. |
-| `scope` | no | `"renderer"` (default), `"main"`, or `"both"`. |
+| `scope` | no | `"renderer"`, `"main"`, or `"both"`. Omitted means `"both"`. |
 | `main` | no | Entry filename. Defaults to `index.js`/`.cjs`/`.mjs`. |
-| `minRuntime` | no | Semver of the minimum runtime your tweak needs. |
+| `minRuntime` | no | Semver of the minimum runtime your tweak needs. Tweaks requiring a newer runtime are shown but not started. |
 
 ## Update checks
 
@@ -102,7 +102,8 @@ These let you reach into Codex's React tree for advanced injection (reading prop
 
 ### Storage
 
-Per-tweak namespaced KV. Renderer storage uses `localStorage`; main storage is currently in-memory (will move to `<userRoot>/storage/<id>.json` in a future release).
+Per-tweak namespaced KV. Renderer storage uses `localStorage`; main storage is
+disk-backed under `<userRoot>/storage/<id>.json` and flushed during teardown.
 
 ```ts
 api.storage.set("foo", 42);
@@ -122,7 +123,8 @@ const result = await api.ipc.invoke("compute", input);
 Main:
 
 ```ts
-api.ipc.handle("compute", (input) => /* ... */);
+const dispose = api.ipc.handle("compute", (input) => /* ... */);
+dispose();
 ```
 
 ### Filesystem sandbox
@@ -134,10 +136,14 @@ Each tweak gets its own writable directory at `<userRoot>/tweak-data/<id>/`. Use
 - `start(api)` is called once after the runtime decides this tweak should run. For renderer tweaks, this is after the page's DOM is ready.
 - `stop()` is called on:
   - app shutdown (main side)
-  - the user disabling the tweak (planned)
-  - hot reload (planned)
+  - the user disabling the tweak
+  - hot reload
+  - manual tweak reload
 
-Make `stop()` idempotent. Clean up DOM nodes you added, IPC listeners, timers.
+`stop()` may return a promise and is awaited. Make it idempotent. Clean up DOM
+nodes you added, IPC listeners, timers, and any external resources. Main-process
+IPC registrations made through `api.ipc.on()` and `api.ipc.handle()` are also
+disposed by Codex++ during teardown.
 
 ## TypeScript
 
@@ -198,3 +204,5 @@ addEventListener("keydown", (e) => {
 - Filter console for `[codex-plusplus]`.
 - Check `<userRoot>/log/main.log` for main-process errors.
 - `codex-plusplus doctor` from a terminal for installer/integrity issues.
+- `codex-plusplus doctor --json` for machine-readable checks.
+- `codex-plusplus support bundle` for a redacted support directory with diagnostics and bounded log tails.

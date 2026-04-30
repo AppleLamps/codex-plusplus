@@ -1,11 +1,11 @@
 import kleur from "kleur";
-import { cpSync, existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, mkdirSync, openSync, closeSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { locateCodex } from "../platform.js";
+import { locateCodex, type CodexInstall } from "../platform.js";
 import { ensureUserPaths } from "../paths.js";
-import { backupOnce, patchAsar, readHeaderHash } from "../asar.js";
-import { setIntegrity, getIntegrity } from "../integrity.js";
+import { backupOnce, readHeaderHash } from "../asar.js";
+import { setIntegrity, describeIntegritySupport } from "../integrity.js";
 import { writeFuse } from "../fuses.js";
 import { adHocSign, clearQuarantine } from "../codesign.js";
 import { readPlist } from "../plist.js";
@@ -13,6 +13,7 @@ import { writeState } from "../state.js";
 import { installWatcher, type WatcherKind } from "../watcher.js";
 import { CODEX_PLUSPLUS_VERSION } from "../version.js";
 import { installDefaultTweaks } from "../default-tweaks.js";
+import { injectLoader } from "../installer-core.js";
 
 interface Opts {
   app?: string;
@@ -40,7 +41,7 @@ export async function install(opts: Opts = {}): Promise<void> {
   // Pre-flight: try to create+remove a probe file inside the app bundle. This
   // surfaces macOS App Management TCC denials BEFORE we touch anything, and
   // also tickles the system into showing the permission prompt on first run.
-  preflightWritable(codex.appRoot);
+  preflightWritable(codex);
   step("Bundle is writable");
 
   const codexVersion = readCodexVersion(codex.metaPath);
@@ -74,9 +75,12 @@ export async function install(opts: Opts = {}): Promise<void> {
   step(`Patched app.asar (entry was ${kleur.dim(originalEntry)})`);
 
   // 4. Update Info.plist hash so Electron's integrity check passes.
+  const integritySupport = describeIntegritySupport(codex.platform, !!codex.metaPath);
   if (codex.metaPath) {
     setIntegrity(codex, patchedAsarHash);
     step(`Updated ElectronAsarIntegrity → ${kleur.dim(patchedAsarHash.slice(0, 12))}…`);
+  } else {
+    step(`Skipped ElectronAsarIntegrity update: ${integritySupport.detail}`);
   }
 
   // 5. Belt-and-suspenders: flip the integrity validation fuse off.
@@ -153,50 +157,6 @@ function readCodexVersion(metaPath: string | null): string | null {
   }
 }
 
-/**
- * Replace app.asar's package.json `main` with our loader, copying the
- * loader.cjs into the asar so it can resolve. Returns the original entry path.
- */
-async function injectLoader(asarPath: string, userRoot: string): Promise<string> {
-  let originalMain = "";
-  await patchAsar(asarPath, (dir) => {
-    const pkgPath = join(dir, "package.json");
-    if (!existsSync(pkgPath)) {
-      throw new Error("app.asar has no package.json — Codex layout changed?");
-    }
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-    originalMain = String(pkg.main ?? "");
-    if (!originalMain) throw new Error("app.asar package.json has no `main` field");
-
-    // Already patched? Bail.
-    if (pkg["__codexpp"]) {
-      originalMain = String(pkg["__codexpp"].originalMain);
-    } else {
-      pkg["__codexpp"] = {
-        originalMain,
-        userRoot,
-        loader: "codex-plusplus-loader.cjs",
-      };
-      pkg.main = "codex-plusplus-loader.cjs";
-      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
-    }
-
-    // Copy our loader stub into the asar root.
-    const loaderSrc = join(assetsDir, "loader.cjs");
-    if (!existsSync(loaderSrc)) {
-      // Fall back to the in-repo path during development.
-      const devLoader = resolve(here, "..", "..", "..", "..", "loader", "loader.cjs");
-      if (!existsSync(devLoader)) {
-        throw new Error(`loader.cjs not found at ${loaderSrc} or ${devLoader}`);
-      }
-      cpSync(devLoader, join(dir, "codex-plusplus-loader.cjs"));
-    } else {
-      cpSync(loaderSrc, join(dir, "codex-plusplus-loader.cjs"));
-    }
-  });
-  return originalMain;
-}
-
 export function stageAssets(runtimeDir: string): void {
   mkdirSync(runtimeDir, { recursive: true });
   const src = join(assetsDir, "runtime");
@@ -227,8 +187,13 @@ function makeStepper(quiet = false) {
  * Touch a probe file inside the app bundle to surface (and trigger) macOS
  * App Management TCC denials before we begin destructive work.
  */
-function preflightWritable(appRoot: string): void {
-  const probe = join(appRoot, "Contents", ".codexpp-write-probe");
+export function preflightProbePath(codex: Pick<CodexInstall, "appRoot" | "resourcesDir" | "platform">): string {
+  if (codex.platform === "darwin") return join(codex.appRoot, "Contents", ".codexpp-write-probe");
+  return join(codex.resourcesDir, ".codexpp-write-probe");
+}
+
+export function preflightWritable(codex: Pick<CodexInstall, "appRoot" | "resourcesDir" | "platform">): void {
+  const probe = preflightProbePath(codex);
   try {
     const fd = openSync(probe, "w");
     closeSync(fd);
@@ -236,9 +201,9 @@ function preflightWritable(appRoot: string): void {
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
     if (err.code === "EPERM" || err.code === "EACCES") {
-      const inApps = appRoot.startsWith("/Applications/");
+      const inApps = codex.platform === "darwin" && codex.appRoot.startsWith("/Applications/");
       const msg =
-        `Cannot write to ${appRoot}.\n\n` +
+        `Cannot write to ${probe}.\n\n` +
         (inApps
           ? `macOS App Management is blocking modification of /Applications/Codex.app.\n` +
             `Fix:\n` +
@@ -246,7 +211,7 @@ function preflightWritable(appRoot: string): void {
             `  2. Enable the toggle for your terminal app (Terminal, iTerm2, etc.)\n` +
             `  3. Re-run this command.\n\n` +
             `(If macOS just showed a permission dialog, click Allow and re-run.)\n`
-          : `Check filesystem permissions on the bundle.\n`) +
+          : `Check filesystem permissions on the Codex install.\n`) +
         `\nOriginal error: ${err.message}`;
       throw new Error(msg);
     }

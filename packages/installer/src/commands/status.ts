@@ -4,12 +4,52 @@ import { readState } from "../state.js";
 import { locateCodex } from "../platform.js";
 import { readHeaderHash } from "../asar.js";
 import { getIntegrity } from "../integrity.js";
+import { describeIntegritySupport } from "../integrity.js";
 import { readFuses, FuseV1 } from "../fuses.js";
 import { existsSync } from "node:fs";
+import type { UserPaths } from "../paths.js";
+import type { InstallerState } from "../state.js";
+import type { CodexInstall } from "../platform.js";
 
-export async function status(): Promise<void> {
+interface Opts {
+  json?: boolean;
+}
+
+export interface StatusSnapshot {
+  paths: {
+    root: string;
+    tweaks: string;
+    logDir: string;
+  };
+  installed: boolean;
+  install: InstallerState | null;
+  codex: {
+    found: boolean;
+    error?: string;
+    appRoot?: string;
+    platform?: string;
+  };
+  integrity: {
+    supported: boolean;
+    detail: string;
+    currentAsarHash?: string;
+    asarMatchesPatched?: boolean;
+    plistHash?: string | null;
+    plistMatchesAsar?: boolean;
+    asarFuse?: string;
+    fuseError?: string;
+  } | null;
+}
+
+export async function status(opts: Opts = {}): Promise<void> {
   const paths = ensureUserPaths();
   const state = readState(paths.stateFile);
+  const snapshot = collectStatus(paths, state);
+
+  if (opts.json) {
+    console.log(JSON.stringify(snapshot, null, 2));
+    return;
+  }
 
   console.log(kleur.bold("codex-plusplus status"));
   console.log(`  user dir:     ${paths.root}`);
@@ -17,7 +57,7 @@ export async function status(): Promise<void> {
   console.log(`  log dir:      ${paths.logDir}`);
   console.log();
 
-  if (!state) {
+  if (!snapshot.installed || !state) {
     console.log(kleur.yellow("Not installed. Run `codex-plusplus install`."));
     return;
   }
@@ -32,39 +72,97 @@ export async function status(): Promise<void> {
   console.log(`  watcher:      ${state.watcher}`);
   console.log();
 
-  let codex;
-  try {
-    codex = locateCodex(state.appRoot);
-  } catch (e) {
-    console.log(kleur.red(`Codex not found at recorded path: ${(e as Error).message}`));
+  if (!snapshot.codex.found) {
+    console.log(kleur.red(`Codex not found at recorded path: ${snapshot.codex.error}`));
     return;
   }
 
   console.log(kleur.bold("integrity"));
-  if (existsSync(codex.asarPath)) {
-    const { headerHash } = readHeaderHash(codex.asarPath);
-    const intact = headerHash === state.patchedAsarHash;
+  const integrity = snapshot.integrity!;
+  console.log(`  platform:     ${integrity.supported ? kleur.green("checked") : kleur.yellow("skipped")}`);
+  console.log(`  detail:       ${integrity.detail}`);
+  if (integrity.currentAsarHash) {
     console.log(
-      `  current asar: ${headerHash.slice(0, 16)}…  ${
-        intact ? kleur.green("(matches patched)") : kleur.red("(drift!)")
+      `  current asar: ${integrity.currentAsarHash.slice(0, 16)}…  ${
+        integrity.asarMatchesPatched ? kleur.green("(matches patched)") : kleur.red("(drift!)")
       }`,
     );
-    if (codex.metaPath) {
-      const plistEntry = getIntegrity(codex);
+    if (integrity.supported) {
       console.log(
-        `  plist hash:   ${plistEntry?.hash.slice(0, 16) ?? "(none)"}…  ${
-          plistEntry?.hash === headerHash ? kleur.green("OK") : kleur.red("mismatch")
+        `  plist hash:   ${integrity.plistHash?.slice(0, 16) ?? "(none)"}…  ${
+          integrity.plistMatchesAsar ? kleur.green("OK") : kleur.red("mismatch")
         }`,
       );
+    }
+  }
+  if (integrity.asarFuse) {
+    console.log(`  asar fuse:    ${integrity.asarFuse}`);
+  } else if (integrity.fuseError) {
+    console.log(kleur.dim(`  fuses:        unreadable (${integrity.fuseError})`));
+  }
+}
+
+export function collectStatus(
+  paths: UserPaths,
+  state: InstallerState | null,
+): StatusSnapshot {
+  const base: StatusSnapshot = {
+    paths: {
+      root: paths.root,
+      tweaks: paths.tweaks,
+      logDir: paths.logDir,
+    },
+    installed: !!state,
+    install: state,
+    codex: { found: false },
+    integrity: null,
+  };
+  if (!state) return base;
+
+  let codex: CodexInstall;
+  try {
+    codex = locateCodex(state.appRoot);
+  } catch (e) {
+    return {
+      ...base,
+      codex: {
+        found: false,
+        error: (e as Error).message,
+      },
+    };
+  }
+
+  const support = describeIntegritySupport(codex.platform, !!codex.metaPath);
+  const integrity: StatusSnapshot["integrity"] = {
+    supported: support.supported,
+    detail: support.detail,
+  };
+  if (existsSync(codex.asarPath)) {
+    const { headerHash } = readHeaderHash(codex.asarPath);
+    integrity.currentAsarHash = headerHash;
+    integrity.asarMatchesPatched = headerHash === state.patchedAsarHash;
+    if (support.supported && codex.metaPath) {
+      const plistEntry = getIntegrity(codex);
+      integrity.plistHash = plistEntry?.hash ?? null;
+      integrity.plistMatchesAsar = plistEntry?.hash === headerHash;
     }
   }
   if (existsSync(codex.electronBinary)) {
     try {
       const fuses = readFuses(codex.electronBinary);
-      const v = fuses.fuses[FuseV1.EnableEmbeddedAsarIntegrityValidation];
-      console.log(`  asar fuse:    ${v}`);
+      integrity.asarFuse = String(fuses.fuses[FuseV1.EnableEmbeddedAsarIntegrityValidation]);
     } catch (e) {
-      console.log(kleur.dim(`  fuses:        unreadable (${(e as Error).message})`));
+      integrity.fuseError = (e as Error).message;
     }
   }
+
+  return {
+    ...base,
+    codex: {
+      found: true,
+      appRoot: codex.appRoot,
+      platform: codex.platform,
+    },
+    integrity,
+  };
 }

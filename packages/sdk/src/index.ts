@@ -168,8 +168,8 @@ export interface TweakIpc {
   send(channel: string, ...args: unknown[]): void;
   /** Renderer ↔ main round-trip; resolves with the handler's return value. */
   invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T>;
-  /** Main-side: handle invokes from the renderer. */
-  handle?(channel: string, handler: (...args: unknown[]) => unknown): void;
+  /** Main-side: handle invokes from the renderer. Returns a disposer. */
+  handle?(channel: string, handler: (...args: unknown[]) => unknown): () => void;
 }
 
 export interface TweakFs {

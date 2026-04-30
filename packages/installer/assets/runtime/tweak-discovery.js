@@ -12,6 +12,8 @@ exports.discoverTweaks = discoverTweaks;
  */
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
+const path_security_1 = require("./path-security");
+const version_1 = require("./version");
 const ENTRY_CANDIDATES = ["index.js", "index.cjs", "index.mjs"];
 function discoverTweaks(tweaksDir) {
     if (!(0, node_fs_1.existsSync)(tweaksDir))
@@ -36,7 +38,15 @@ function discoverTweaks(tweaksDir) {
         const entry = resolveEntry(dir, manifest);
         if (!entry)
             continue;
-        out.push({ dir, entry, manifest });
+        const loadError = (0, version_1.minRuntimeError)(manifest.minRuntime);
+        out.push({
+            dir,
+            entry,
+            manifest,
+            loadable: !loadError,
+            ...(loadError ? { loadError } : {}),
+            capabilities: manifestCapabilities(manifest),
+        });
     }
     return out;
 }
@@ -51,14 +61,32 @@ function isValidManifest(m) {
 }
 function resolveEntry(dir, m) {
     if (m.main) {
-        const p = (0, node_path_1.join)(dir, m.main);
-        return (0, node_fs_1.existsSync)(p) ? p : null;
+        try {
+            return (0, path_security_1.resolveInside)(dir, m.main, { mustExist: true, requireFile: true });
+        }
+        catch {
+            return null;
+        }
     }
     for (const c of ENTRY_CANDIDATES) {
-        const p = (0, node_path_1.join)(dir, c);
-        if ((0, node_fs_1.existsSync)(p))
-            return p;
+        try {
+            return (0, path_security_1.resolveInside)(dir, c, { mustExist: true, requireFile: true });
+        }
+        catch { }
     }
     return null;
+}
+function manifestCapabilities(manifest) {
+    const scope = manifest.scope ?? "both";
+    const caps = ["isolated storage", "scoped IPC"];
+    if (scope === "main" || scope === "both")
+        caps.unshift("main process");
+    if (scope === "renderer" || scope === "both")
+        caps.unshift("renderer UI");
+    if (manifest.main)
+        caps.push("custom entry");
+    if (manifest.minRuntime)
+        caps.push("runtime gate");
+    return caps;
 }
 //# sourceMappingURL=tweak-discovery.js.map

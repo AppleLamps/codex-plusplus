@@ -6,9 +6,9 @@
  * (the leading length-prefixed JSON blob), not the entire file. @electron/asar
  * exposes this via `getRawHeader()`.
  */
-import asar from "@electron/asar";
+import * as asar from "@electron/asar";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, existsSync, renameSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, copyFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +20,7 @@ export interface AsarHeaderInfo {
 }
 
 export function readHeaderHash(asarPath: string): AsarHeaderInfo {
+  asar.uncache(asarPath);
   // getRawHeader returns { header, headerString, headerSize }
   const raw = (asar as unknown as {
     getRawHeader: (p: string) => { header: unknown; headerString: string };
@@ -71,11 +72,20 @@ export async function patchAsar(
       throw annotatePermError(e, asarPath);
     }
     try {
-      renameSync(stagingPath, asarPath);
+      if (process.platform === "win32") {
+        // Windows rename-over-existing can leave a malformed asar in practice.
+        // We already have a complete same-filesystem staging file, so overwrite
+        // the target directly on Windows and keep rename for POSIX atomicity.
+        copyFileSync(stagingPath, asarPath);
+        unlinkSync(stagingPath);
+      } else {
+        renameSync(stagingPath, asarPath);
+      }
     } catch (e) {
       try { unlinkSync(stagingPath); } catch { /* best effort */ }
       throw annotatePermError(e, asarPath);
     }
+    asar.uncache(asarPath);
     return readHeaderHash(asarPath);
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -127,6 +137,7 @@ export function backupOnce(from: string, to: string): void {
 
 /** Read a file inside the asar without extracting the whole thing. */
 export function readFileInAsar(asarPath: string, relPath: string): Buffer {
+  asar.uncache(asarPath);
   return asar.extractFile(asarPath, relPath) as Buffer;
 }
 

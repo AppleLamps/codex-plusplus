@@ -5,7 +5,8 @@
   "main": "dist/main.js",
   "description": "In-app runtime: discovers tweaks, injects settings UI, hot-reloads.",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node ./scripts/bundle-renderer.mjs"
+    "build": "tsc -p tsconfig.json && node ./scripts/bundle-renderer.mjs",
+    "test": "node --test --import tsx \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@codex-plusplus/sdk": "*",
@@ -15,6 +16,7 @@
     "@types/node": "^22.19.17",
     "electron": "^41.3.0",
     "esbuild": "^0.28.0",
+    "happy-dom": "^20.9.0",
     "typescript": "^5.6.0"
   },
   "license": "MIT"

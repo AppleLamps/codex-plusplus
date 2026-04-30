@@ -14,6 +14,7 @@ const settings_injector_1 = require("./settings-injector");
 async function mountManager() {
     const tweaks = (await electron_1.ipcRenderer.invoke("codexpp:list-tweaks"));
     const paths = (await electron_1.ipcRenderer.invoke("codexpp:user-paths"));
+    const health = (await electron_1.ipcRenderer.invoke("codexpp:runtime-health").catch(() => null));
     (0, settings_injector_1.registerSection)({
         id: "codex-plusplus:manager",
         title: "Tweak Manager",
@@ -26,6 +27,19 @@ async function mountManager() {
             actions.appendChild(button("Open logs", () => electron_1.ipcRenderer.invoke("codexpp:reveal", paths.logDir).catch(() => { })));
             actions.appendChild(button("Reload window", () => location.reload()));
             root.appendChild(actions);
+            if (health) {
+                const diagnostics = document.createElement("div");
+                diagnostics.style.cssText =
+                    "color:#888;font:12px system-ui;border:1px solid var(--border,#2a2a2a);border-radius:6px;padding:8px 10px;";
+                const reload = health.lastReload
+                    ? `${health.lastReload.ok ? "ok" : "failed"} ${new Date(health.lastReload.at).toLocaleString()}`
+                    : "not yet";
+                diagnostics.textContent =
+                    `Runtime ${health.version}; discovered ${health.tweaks.discovered}; ` +
+                        `main loaded ${health.tweaks.loadedMain}; last reload ${reload}; ` +
+                        `recent warnings/errors ${health.recentErrors.length}`;
+                root.appendChild(diagnostics);
+            }
             if (tweaks.length === 0) {
                 const empty = document.createElement("p");
                 empty.style.cssText = "color:#888;font:13px system-ui;margin:8px 0;";
@@ -47,7 +61,10 @@ async function mountManager() {
         `;
                 const right = document.createElement("div");
                 right.style.cssText = "color:#888;font:12px system-ui;";
-                right.textContent = t.entryExists ? "loaded" : "missing entry";
+                right.textContent =
+                    !t.entryExists ? "missing entry"
+                        : !t.loadable ? t.loadError ?? "not loadable"
+                            : t.capabilities?.join(", ") || "loaded";
                 li.append(left, right);
                 list.append(li);
             }

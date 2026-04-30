@@ -83,7 +83,7 @@ function subscribeReload(): void {
     reloading = (async () => {
       try {
         console.info("[codex-plusplus] hot-reloading tweaks");
-        teardownTweakHost();
+        await teardownTweakHost();
         await startTweakHost();
         await mountManager();
       } catch (e) {

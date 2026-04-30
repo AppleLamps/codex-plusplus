@@ -14,8 +14,22 @@ Everything beyond the one-time install patch lives **outside** the app bundle, s
 
 ## Install
 
+macOS/Linux:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.ps1 | iex
+```
+
+If auto-detection misses your app, pass the app path to the built CLI:
+
+```sh
+codex-plusplus install --app <path-to-Codex-app-or-install-dir>
 ```
 
 That's it. The installer:
@@ -37,7 +51,10 @@ To revert:
 node ~/.codex-plusplus/source/packages/installer/dist/cli.js uninstall
 ```
 
-Other commands: `status`, `doctor`, `repair`, `tweaks list`, `tweaks open` (opens user tweaks dir).
+Other commands: `status`, `status --json`, `doctor`, `doctor --json`,
+`support bundle`, `repair`, `tweaks list`, and `tweaks open` (opens the user
+tweaks dir). Use `doctor --json` and `support bundle` when filing issues or
+collecting support diagnostics.
 
 Default tweaks currently installed on first run:
 
@@ -91,6 +108,13 @@ See [`docs/WRITING-TWEAKS.md`](./docs/WRITING-TWEAKS.md) for the full API.
 Every tweak manifest must include `githubRepo` in `owner/repo` form. Codex++ checks GitHub Releases for each installed tweak at most once per day and shows **Update Available** in Settings → Tweaks when a newer semver release exists.
 
 Codex++ does **not** auto-update tweaks. The manager links to the GitHub release so users can review the diff, release notes, and repository before manually replacing local tweak files.
+
+Tweaks can declare `minRuntime`; incompatible tweaks stay visible in Settings
+and `tweaks list`, but are not started.
+
+The manager and `tweaks list` also show a computed capability summary such as
+renderer UI, main process, scoped IPC, isolated storage, custom entry, and
+runtime gate. This is informational trust metadata, not a new sandbox.
 
 See [`SECURITY.md`](./SECURITY.md) for the security model and reporting policy.
 

@@ -18,6 +18,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @codex-plusplus/sdk && npm run build --workspace @codex-plusplus/runtime && npm run build --workspace @codex-plusplus/loader && npm run build --workspace codex-plusplus",
+    "test": "npm test --workspaces --if-present",
+    "check": "npm test && npm run build && node scripts/check-release.mjs && npm run audit",
     "clean": "rm -rf packages/*/dist packages/installer/assets/runtime",
     "audit": "npm audit --workspaces --include-workspace-root"
   },

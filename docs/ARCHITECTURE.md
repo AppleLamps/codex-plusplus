@@ -58,7 +58,7 @@ The installer seeds the default tweak set from external GitHub release tarballs 
    - `require()`s `<userRoot>/runtime/main.js`.
    - `require()`s the original `__codexpp.originalMain` (Codex's real entry).
 6. Runtime's `main.js`:
-   - Registers our preload via `session.setPreloads()` (additive — Codex's own preload still runs).
+   - Registers our preload via `session.registerPreloadScript()` (additive — Codex's own preload still runs).
    - Discovers tweaks under `<userRoot>/tweaks`.
    - Starts main-scoped tweaks immediately.
    - Sets up IPC handlers.
@@ -66,13 +66,16 @@ The installer seeds the default tweak set from external GitHub release tarballs 
 8. Our preload:
    - Installs a React DevTools-shaped global hook (so we can fiber-walk later).
    - Asks main for the tweak list and user paths over IPC.
-   - For each renderer-scoped tweak, `require()`s its entry and calls `start(api)`.
+   - For each renderer-scoped tweak, asks main to read the entry source from
+     the sandboxed tweaks directory, evaluates it in the preload context, and
+     calls `start(api)`.
    - Starts the Settings injector (MutationObserver waiting for the Settings dialog).
    - Mounts the built-in Tweak Manager section.
 9. When the user opens Settings, our injector:
-   - Detects the Radix `[role="dialog"]` matching "Settings".
-   - Appends a "Tweaks" tab to the dialog's `[role="tablist"]`.
-   - Creates a sibling content panel that shows registered sections when the tab is clicked, and hides itself when other tabs are clicked.
+   - Detects Codex's settings sidebar by matching known native settings item labels.
+   - Appends a Codex Plus Plus sidebar group with Config and Tweaks entries.
+   - Creates a sibling content panel that shows registered sections, installed
+     tweak status, capability labels, and compact runtime diagnostics.
 
 ## Why these choices
 
@@ -92,9 +95,34 @@ Codex is a Vite/Rollup build with a single entry chunk and no module registry ex
 
 So you can iterate on tweaks (and even on the runtime itself) without re-running the installer. The installer's job is the one-time "punch a hole in the bundle"; everything else lives outside.
 
-### Why `session.setPreloads()` instead of `webPreferences.preload`?
+### Why `session.registerPreloadScript()` instead of `webPreferences.preload`?
 
-`webPreferences.preload` is a single string; setting it would replace Codex's own preload and break the app. `session.setPreloads()` is *additive* — it appends to whatever the renderer already has. Available since Electron 23+.
+`webPreferences.preload` is a single string; setting it would replace Codex's own preload and break the app. `session.registerPreloadScript()` is additive and works reliably with sandboxed renderers on modern Electron.
+
+## Runtime boundaries
+
+The runtime treats tweak source, assets, manifest entries, and per-tweak data
+files as containment boundaries. Paths are resolved through canonical filesystem
+checks before reads/writes. `manifest.main` and default entries must remain
+inside the owning tweak directory, and `minRuntime` is enforced before a tweak is
+started.
+
+Tweak `stop()` may be async. Runtime reloads and app shutdown await teardown,
+flush storage, and clean up main-process IPC registrations before starting the
+next copy of a tweak.
+
+The capability labels shown by `tweaks list` and the manager are computed from
+existing manifest/runtime facts. They are trust hints for users and support
+debugging; they do not enforce additional OS sandboxing.
+
+## Diagnostics
+
+`codex-plusplus status --json` reports install and integrity state.
+`codex-plusplus doctor --json` reports the same checks as human doctor output in
+a stable JSON shape. `codex-plusplus support bundle` writes a timestamped
+redacted directory containing status/doctor JSON, redacted state/config
+summaries, and bounded log tails. Support bundles exclude tweak source, arbitrary
+file contents, environment variables, secrets, and full app bundles.
 
 ## Update handling
 

@@ -37,6 +37,44 @@ systemctl --user status codex-plusplus-watcher  # Linux
 schtasks /Query /TN codex-plusplus-watcher       # Windows
 ```
 
+## Need paths or machine-readable status
+
+```sh
+codex-plusplus status
+codex-plusplus status --json
+codex-plusplus doctor --json
+codex-plusplus support bundle
+codex-plusplus tweaks list
+codex-plusplus tweaks open
+```
+
+`status` and `doctor` state whether asar integrity was checked or skipped on
+the current platform.
+
+`support bundle` creates a timestamped redacted directory under the
+codex-plusplus user data directory by default. It includes JSON status/doctor
+output, redacted state/config summaries, and bounded log tails. It does not
+include tweak source, arbitrary file contents, environment variables, or app
+bundles.
+
+## Windows install notes
+
+Use PowerShell, not Git Bash, for the Windows bootstrap:
+
+```powershell
+irm https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.ps1 | iex
+```
+
+If Codex is installed in a non-standard location, run:
+
+```powershell
+codex-plusplus install --app "C:\Path\To\Codex"
+```
+
+Windows and Linux currently skip plist integrity writing because that
+ElectronAsarIntegrity metadata is macOS-specific. `status`, `status --json`,
+`doctor`, and `doctor --json` report when integrity was checked or skipped.
+
 ## "Tweaks" tab doesn't appear in Settings
 
 Codex's Settings markup may have changed. The injector's heuristics need an update. As a workaround:
@@ -56,6 +94,7 @@ Common causes:
 
 - `manifest.json` not valid JSON
 - Missing `id`/`name`/`version` fields
+- `minRuntime` requires a newer Codex++ runtime
 - Entry script throws during `require`
 - ESM-style `export default` in a `.js` file (use `.mjs` or `module.exports`)
 

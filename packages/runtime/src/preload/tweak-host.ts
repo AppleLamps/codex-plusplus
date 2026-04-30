@@ -28,6 +28,9 @@ interface ListedTweak {
   dir: string;
   entryExists: boolean;
   enabled: boolean;
+  loadable: boolean;
+  loadError?: string;
+  capabilities?: string[];
   update: {
     checkedAt: string;
     repo: string;
@@ -47,7 +50,7 @@ interface UserPaths {
   logDir: string;
 }
 
-const loaded = new Map<string, { stop?: () => void }>();
+const loaded = new Map<string, { stop?: () => void | Promise<void> }>();
 let cachedPaths: UserPaths | null = null;
 
 export async function startTweakHost(): Promise<void> {
@@ -66,6 +69,7 @@ export async function startTweakHost(): Promise<void> {
     if (t.manifest.scope === "main") continue;
     if (!t.entryExists) continue;
     if (!t.enabled) continue;
+    if (!t.loadable) continue;
     try {
       await loadTweak(t, paths);
     } catch (e) {
@@ -89,10 +93,10 @@ export async function startTweakHost(): Promise<void> {
  * re-evaluate fresh source. Module cache isn't relevant since we eval
  * source strings directly — each load creates a fresh scope.
  */
-export function teardownTweakHost(): void {
+export async function teardownTweakHost(): Promise<void> {
   for (const [id, t] of loaded) {
     try {
-      t.stop?.();
+      await t.stop?.();
     } catch (e) {
       console.warn("[codex-plusplus] tweak stop failed:", id, e);
     }

@@ -23,6 +23,8 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.startSettingsInjector = startSettingsInjector;
+exports.__tryInjectForTests = __tryInjectForTests;
+exports.__resetSettingsInjectorForTests = __resetSettingsInjectorForTests;
 exports.registerSection = registerSection;
 exports.clearSections = clearSections;
 exports.registerPage = registerPage;
@@ -87,6 +89,33 @@ function startSettingsInjector() {
         if (ticks > 60)
             clearInterval(interval);
     }, 500);
+}
+function __tryInjectForTests() {
+    tryInject();
+}
+function __resetSettingsInjectorForTests() {
+    state.observer?.disconnect();
+    state.observer = null;
+    for (const p of state.pages.values()) {
+        try {
+            p.teardown?.();
+        }
+        catch { }
+    }
+    state.sections.clear();
+    state.pages.clear();
+    state.listedTweaks = [];
+    state.outerWrapper = null;
+    state.navGroup = null;
+    state.navButtons = null;
+    state.pagesGroup = null;
+    state.pagesGroupKey = null;
+    state.panelHost = null;
+    state.fingerprint = null;
+    state.sidebarDumped = false;
+    state.activePage = null;
+    state.sidebarRoot = null;
+    state.sidebarRestoreHandler = null;
 }
 function onNav() {
     state.fingerprint = null;
@@ -758,7 +787,7 @@ function tweakRow(t, sections) {
     // body of the same tweak.
     const cell = document.createElement("div");
     cell.className = "flex flex-col";
-    if (!t.enabled)
+    if (!t.enabled || !t.loadable)
         cell.style.opacity = "0.7";
     const header = document.createElement("div");
     header.className = "flex items-start justify-between gap-4 p-3";
@@ -828,8 +857,21 @@ function tweakRow(t, sections) {
         badge.textContent = "Update Available";
         titleRow.appendChild(badge);
     }
+    if (!t.loadable) {
+        const badge = document.createElement("span");
+        badge.className =
+            "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] font-medium text-token-text-secondary";
+        badge.textContent = "Not Loaded";
+        titleRow.appendChild(badge);
+    }
     stack.appendChild(titleRow);
-    if (m.description) {
+    if (t.loadError) {
+        const desc = document.createElement("div");
+        desc.className = "text-token-text-secondary min-w-0 text-sm";
+        desc.textContent = t.loadError;
+        stack.appendChild(desc);
+    }
+    else if (m.description) {
         const desc = document.createElement("div");
         desc.className = "text-token-text-secondary min-w-0 text-sm";
         desc.textContent = m.description;
@@ -880,6 +922,18 @@ function tweakRow(t, sections) {
         }
         stack.appendChild(tagsRow);
     }
+    if (t.capabilities && t.capabilities.length > 0) {
+        const capRow = document.createElement("div");
+        capRow.className = "flex flex-wrap items-center gap-1 pt-0.5";
+        for (const cap of t.capabilities) {
+            const pill = document.createElement("span");
+            pill.className =
+                "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] text-token-description-foreground";
+            pill.textContent = cap;
+            capRow.appendChild(pill);
+        }
+        stack.appendChild(capRow);
+    }
     left.appendChild(stack);
     header.appendChild(left);
     // ── Toggle ────────────────────────────────────────────────────────────
@@ -899,7 +953,7 @@ function tweakRow(t, sections) {
     cell.appendChild(header);
     // If the tweak is enabled and registered settings sections, render those
     // bodies as nested rows beneath the header inside the same cell.
-    if (t.enabled && sections.length > 0) {
+    if (t.enabled && t.loadable && sections.length > 0) {
         const nested = document.createElement("div");
         nested.className =
             "flex flex-col divide-y-[0.5px] divide-token-border border-t-[0.5px] border-token-border";

@@ -38,6 +38,8 @@ async function startTweakHost() {
             continue;
         if (!t.enabled)
             continue;
+        if (!t.loadable)
+            continue;
         try {
             await loadTweak(t, paths);
         }
@@ -53,10 +55,10 @@ async function startTweakHost() {
  * re-evaluate fresh source. Module cache isn't relevant since we eval
  * source strings directly — each load creates a fresh scope.
  */
-function teardownTweakHost() {
+async function teardownTweakHost() {
     for (const [id, t] of loaded) {
         try {
-            t.stop?.();
+            await t.stop?.();
         }
         catch (e) {
             console.warn("[codex-plusplus] tweak stop failed:", id, e);

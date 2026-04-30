@@ -5,14 +5,37 @@ import { locateCodex } from "../platform.js";
 import { readHeaderHash } from "../asar.js";
 import { verifySignature } from "../codesign.js";
 import { existsSync, accessSync, constants } from "node:fs";
+import { basename } from "node:path";
+import { describeIntegritySupport } from "../integrity.js";
 
-interface Check {
+interface Opts {
+  json?: boolean;
+}
+
+export interface Check {
   name: string;
   ok: boolean | "warn";
   detail: string;
 }
 
-export async function doctor(): Promise<void> {
+export interface DoctorSnapshot {
+  checkedAt: string;
+  checks: Check[];
+  failed: number;
+  warnings: number;
+}
+
+export async function doctor(opts: Opts = {}): Promise<void> {
+  const snapshot = collectDoctorChecks();
+  if (opts.json) {
+    console.log(JSON.stringify(snapshot, null, 2));
+    if (snapshot.failed > 0) process.exitCode = 1;
+    return;
+  }
+  print(snapshot.checks);
+}
+
+export function collectDoctorChecks(): DoctorSnapshot {
   const checks: Check[] = [];
   const paths = ensureUserPaths();
   const state = readState(paths.stateFile);
@@ -29,8 +52,7 @@ export async function doctor(): Promise<void> {
       ok: false,
       detail: "no state file — run `codex-plusplus install`",
     });
-    print(checks);
-    return;
+    return snapshot(checks);
   }
 
   let codex;
@@ -43,8 +65,7 @@ export async function doctor(): Promise<void> {
       ok: false,
       detail: (e as Error).message,
     });
-    print(checks);
-    return;
+    return snapshot(checks);
   }
 
   if (existsSync(codex.asarPath)) {
@@ -70,15 +91,26 @@ export async function doctor(): Promise<void> {
     });
   }
 
+  const integrity = describeIntegritySupport(codex.platform, !!codex.metaPath);
+  checks.push({
+    name: "asar integrity",
+    ok: integrity.supported ? true : "warn",
+    detail: integrity.detail,
+  });
+
   for (const dir of [paths.runtime, paths.tweaks, paths.logDir]) {
     checks.push({
-      name: `${dir.split("/").slice(-1)} dir`,
+      name: `${diagnosticDirLabel(dir)} dir`,
       ok: existsSync(dir),
       detail: dir,
     });
   }
 
-  print(checks);
+  return snapshot(checks);
+}
+
+export function diagnosticDirLabel(dir: string): string {
+  return basename(dir);
 }
 
 function tryWrite(p: string): boolean {
@@ -88,6 +120,15 @@ function tryWrite(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+function snapshot(checks: Check[]): DoctorSnapshot {
+  return {
+    checkedAt: new Date().toISOString(),
+    checks,
+    failed: checks.filter((c) => c.ok === false).length,
+    warnings: checks.filter((c) => c.ok === "warn").length,
+  };
 }
 
 function print(checks: Check[]): void {

@@ -13,6 +13,11 @@ import { join, resolve } from "node:path";
 import chokidar from "chokidar";
 import { discoverTweaks, type DiscoveredTweak } from "./tweak-discovery";
 import { createDiskStorage, type DiskStorage } from "./storage";
+import { resolveInside, isInsidePath } from "./path-security";
+import { stopLoadedTweaks } from "./lifecycle";
+import { CODEX_PLUSPLUS_VERSION, compareVersions, normalizeVersion } from "./version";
+import { createMainIpc, type Disposer } from "./main-ipc";
+import { createRuntimeHealth, type RuntimeHealthEvent, type RuntimeReloadStatus } from "./health";
 
 const userRoot = process.env.CODEX_PLUSPLUS_USER_ROOT;
 const runtimeDir = process.env.CODEX_PLUSPLUS_RUNTIME;
@@ -24,15 +29,18 @@ if (!userRoot || !runtimeDir) {
 }
 
 const PRELOAD_PATH = resolve(runtimeDir, "preload.js");
-const TWEAKS_DIR = join(userRoot, "tweaks");
+const TWEAKS_DIR = resolve(userRoot, "tweaks");
 const LOG_DIR = join(userRoot, "log");
 const LOG_FILE = join(LOG_DIR, "main.log");
 const CONFIG_FILE = join(userRoot, "config.json");
-const CODEX_PLUSPLUS_VERSION = "0.1.0";
 const CODEX_PLUSPLUS_REPO = "b-nnett/codex-plusplus";
 
 mkdirSync(LOG_DIR, { recursive: true });
 mkdirSync(TWEAKS_DIR, { recursive: true });
+
+const runtimeStartedAt = new Date().toISOString();
+const recentRuntimeErrors: RuntimeHealthEvent[] = [];
+let lastReload: RuntimeReloadStatus | null = null;
 
 // Optional: enable Chrome DevTools Protocol on a TCP port so we can drive the
 // running Codex from outside (curl http://localhost:<port>/json, attach via
@@ -123,6 +131,17 @@ function log(level: "info" | "warn" | "error", ...args: unknown[]): void {
   try {
     appendFileSync(LOG_FILE, line);
   } catch {}
+  if (level === "warn" || level === "error") {
+    recentRuntimeErrors.push({
+      at: new Date().toISOString(),
+      level,
+      message: args
+        .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+        .join(" ")
+        .slice(0, 500),
+    });
+    recentRuntimeErrors.splice(0, Math.max(0, recentRuntimeErrors.length - 20));
+  }
   if (level === "error") console.error("[codex-plusplus]", ...args);
 }
 
@@ -135,7 +154,8 @@ process.on("unhandledRejection", (e) => {
 });
 
 interface LoadedMainTweak {
-  stop?: () => void;
+  stop?: () => void | Promise<void>;
+  disposers: Disposer[];
   storage: DiskStorage;
 }
 
@@ -143,6 +163,8 @@ const tweakState = {
   discovered: [] as DiscoveredTweak[],
   loadedMain: new Map<string, LoadedMainTweak>(),
 };
+
+const registeredMainHandles = new Map<string, Disposer>();
 
 // 1. Hook every session so our preload runs in every renderer.
 //
@@ -212,16 +234,17 @@ app.on("web-contents-created", (_e, wc) => {
 log("info", "main.ts evaluated; app.isReady=" + app.isReady());
 
 // 2. Initial tweak discovery + main-scope load.
-loadAllMainTweaks();
+void loadAllMainTweaks();
 
-app.on("will-quit", () => {
-  stopAllMainTweaks();
-  // Best-effort flush of any pending storage writes.
-  for (const t of tweakState.loadedMain.values()) {
-    try {
-      t.storage.flush();
-    } catch {}
-  }
+let quitAfterTweakStop = false;
+app.on("before-quit", (event) => {
+  if (quitAfterTweakStop) return;
+  event.preventDefault();
+  quitAfterTweakStop = true;
+  void (async () => {
+    await stopAllMainTweaks();
+    app.quit();
+  })();
 });
 
 // 3. IPC: expose tweak metadata + reveal-in-finder.
@@ -234,16 +257,18 @@ ipcMain.handle("codexpp:list-tweaks", async () => {
     dir: t.dir,
     entryExists: existsSync(t.entry),
     enabled: isTweakEnabled(t.manifest.id),
+    loadable: t.loadable,
+    loadError: t.loadError,
+    capabilities: t.capabilities,
     update: updateChecks[t.manifest.id] ?? null,
   }));
 });
 
 ipcMain.handle("codexpp:get-tweak-enabled", (_e, id: string) => isTweakEnabled(id));
-ipcMain.handle("codexpp:set-tweak-enabled", (_e, id: string, enabled: boolean) => {
+ipcMain.handle("codexpp:set-tweak-enabled", async (_e, id: string, enabled: boolean) => {
   setTweakEnabled(id, !!enabled);
   log("info", `tweak ${id} enabled=${!!enabled}`);
-  // Broadcast so renderer hosts re-evaluate which tweaks should be running.
-  broadcastReload();
+  await reloadTweaks(`tweak ${id} enabled=${!!enabled}`);
   return true;
 });
 
@@ -265,14 +290,30 @@ ipcMain.handle("codexpp:check-codexpp-update", async (_e, force?: boolean) => {
   return ensureCodexPlusPlusUpdateCheck(force === true);
 });
 
+ipcMain.handle("codexpp:runtime-health", () =>
+  createRuntimeHealth({
+    version: CODEX_PLUSPLUS_VERSION,
+    userRoot,
+    runtimeDir,
+    tweaksDir: TWEAKS_DIR,
+    logDir: LOG_DIR,
+    discoveredTweaks: tweakState.discovered.length,
+    loadedMainTweaks: tweakState.loadedMain.size,
+    loadedRendererTweaks: null,
+    startedAt: runtimeStartedAt,
+    lastReload,
+    recentErrors: recentRuntimeErrors,
+  }),
+);
+
 // Sandboxed renderer preload can't use Node fs to read tweak source. Main
 // reads it on the renderer's behalf. Path must live under tweaksDir for
 // security — we refuse anything else.
 ipcMain.handle("codexpp:read-tweak-source", (_e, entryPath: string) => {
-  const resolved = resolve(entryPath);
-  if (!resolved.startsWith(TWEAKS_DIR + "/") && resolved !== TWEAKS_DIR) {
-    throw new Error("path outside tweaks dir");
-  }
+  const resolved = resolveInside(TWEAKS_DIR, entryPath, {
+    mustExist: true,
+    requireFile: true,
+  });
   return require("node:fs").readFileSync(resolved, "utf8");
 });
 
@@ -299,14 +340,14 @@ ipcMain.handle(
   "codexpp:read-tweak-asset",
   (_e, tweakDir: string, relPath: string) => {
     const fs = require("node:fs") as typeof import("node:fs");
-    const dir = resolve(tweakDir);
-    if (!dir.startsWith(TWEAKS_DIR + "/")) {
-      throw new Error("tweakDir outside tweaks dir");
-    }
-    const full = resolve(dir, relPath);
-    if (!full.startsWith(dir + "/")) {
-      throw new Error("path traversal");
-    }
+    const dir = resolveInside(TWEAKS_DIR, tweakDir, {
+      mustExist: true,
+      requireDirectory: true,
+    });
+    const full = resolveInside(dir, relPath, {
+      mustExist: true,
+      requireFile: true,
+    });
     const stat = fs.statSync(full);
     if (stat.size > ASSET_MAX_BYTES) {
       throw new Error(`asset too large (${stat.size} > ${ASSET_MAX_BYTES})`);
@@ -334,17 +375,21 @@ ipcMain.on("codexpp:preload-log", (_e, level: "info" | "warn" | "error", msg: st
 // over IPC instead of using Node fs directly.
 ipcMain.handle("codexpp:tweak-fs", (_e, op: string, id: string, p: string, c?: string) => {
   if (!/^[a-zA-Z0-9._-]+$/.test(id)) throw new Error("bad tweak id");
-  if (p.includes("..")) throw new Error("path traversal");
-  const dir = join(userRoot!, "tweak-data", id);
+  const dir = resolve(userRoot!, "tweak-data", id);
   mkdirSync(dir, { recursive: true });
-  const full = join(dir, p);
+  if (op === "dataDir") return dir;
+  if (!["read", "write", "exists"].includes(op)) {
+    throw new Error(`unknown op: ${op}`);
+  }
+  const full = resolveInside(dir, p, {
+    mustExist: op === "read",
+    requireFile: op === "read",
+  });
   const fs = require("node:fs") as typeof import("node:fs");
   switch (op) {
     case "read": return fs.readFileSync(full, "utf8");
     case "write": return fs.writeFileSync(full, c ?? "", "utf8");
     case "exists": return fs.existsSync(full);
-    case "dataDir": return dir;
-    default: throw new Error(`unknown op: ${op}`);
   }
 });
 
@@ -374,12 +419,8 @@ ipcMain.handle("codexpp:copy-text", (_e, text: string) => {
 
 // Manual force-reload trigger from the renderer (e.g. the "Force Reload"
 // button on our injected Tweaks page). Bypasses the watcher debounce.
-ipcMain.handle("codexpp:reload-tweaks", () => {
-  log("info", "reloading tweaks (manual)");
-  stopAllMainTweaks();
-  clearTweakModuleCache();
-  loadAllMainTweaks();
-  broadcastReload();
+ipcMain.handle("codexpp:reload-tweaks", async () => {
+  await reloadTweaks("manual");
   return { at: Date.now(), count: tweakState.discovered.length };
 });
 
@@ -394,11 +435,7 @@ function scheduleReload(reason: string): void {
   if (reloadTimer) clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
     reloadTimer = null;
-    log("info", `reloading tweaks (${reason})`);
-    stopAllMainTweaks();
-    clearTweakModuleCache();
-    loadAllMainTweaks();
-    broadcastReload();
+    void reloadTweaks(reason);
   }, RELOAD_DEBOUNCE_MS);
 }
 
@@ -409,7 +446,9 @@ try {
     // written tweak files during editor saves / git checkouts.
     awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
     // Avoid eating CPU on huge node_modules trees inside tweak folders.
-    ignored: (p) => p.includes(`${TWEAKS_DIR}/`) && /\/node_modules\//.test(p),
+    ignored: (p) =>
+      isInsidePath(TWEAKS_DIR, resolve(p)) &&
+      /(^|[\\/])node_modules([\\/]|$)/.test(p),
   });
   watcher.on("all", (event, path) => scheduleReload(`${event} ${path}`));
   watcher.on("error", (e) => log("warn", "watcher error:", e));
@@ -421,7 +460,23 @@ try {
 
 // --- helpers ---
 
-function loadAllMainTweaks(): void {
+async function reloadTweaks(reason: string): Promise<void> {
+  log("info", `reloading tweaks (${reason})`);
+  try {
+    await stopAllMainTweaks();
+    clearTweakModuleCache();
+    await loadAllMainTweaks();
+    lastReload = { at: new Date().toISOString(), reason, ok: true };
+    broadcastReload();
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    lastReload = { at: new Date().toISOString(), reason, ok: false, error };
+    log("error", `reload failed (${reason}):`, error);
+    throw e;
+  }
+}
+
+async function loadAllMainTweaks(): Promise<void> {
   try {
     tweakState.discovered = discoverTweaks(TWEAKS_DIR);
     log(
@@ -436,60 +491,67 @@ function loadAllMainTweaks(): void {
 
   for (const t of tweakState.discovered) {
     if (t.manifest.scope === "renderer") continue;
+    if (!t.loadable) {
+      log("warn", `skipping incompatible main tweak ${t.manifest.id}: ${t.loadError}`);
+      continue;
+    }
     if (!isTweakEnabled(t.manifest.id)) {
       log("info", `skipping disabled main tweak: ${t.manifest.id}`);
       continue;
     }
+    let startupDisposers: Disposer[] = [];
     try {
       const mod = require(t.entry);
       const tweak = mod.default ?? mod;
       if (typeof tweak?.start === "function") {
         const storage = createDiskStorage(userRoot!, t.manifest.id);
-        tweak.start({
+        const disposers: Disposer[] = [];
+        startupDisposers = disposers;
+        await tweak.start({
           manifest: t.manifest,
           process: "main",
           log: makeLogger(t.manifest.id),
           storage,
-          ipc: makeMainIpc(t.manifest.id),
+          ipc: makeMainIpc(t.manifest.id, disposers),
           fs: makeMainFs(t.manifest.id),
         });
         tweakState.loadedMain.set(t.manifest.id, {
           stop: tweak.stop,
+          disposers,
           storage,
         });
         log("info", `started main tweak: ${t.manifest.id}`);
       }
     } catch (e) {
+      for (const dispose of startupDisposers) {
+        try {
+          dispose();
+        } catch {}
+      }
       log("error", `tweak ${t.manifest.id} failed to start:`, e);
     }
   }
 }
 
-function stopAllMainTweaks(): void {
-  for (const [id, t] of tweakState.loadedMain) {
-    try {
-      t.stop?.();
-      t.storage.flush();
-      log("info", `stopped main tweak: ${id}`);
-    } catch (e) {
-      log("warn", `stop failed for ${id}:`, e);
-    }
-  }
-  tweakState.loadedMain.clear();
+function stopAllMainTweaks(): Promise<void> {
+  return stopLoadedTweaks(tweakState.loadedMain, {
+    info: (message) => log("info", message.replace("stopped tweak:", "stopped main tweak:")),
+    warn: (message, error) => log("warn", message, error),
+  });
 }
 
 function clearTweakModuleCache(): void {
-  // Drop any cached require() entries that live inside the tweaks dir so a
-  // re-require on next load picks up fresh code. We do prefix matching on
-  // the resolved tweaks dir.
-  const prefix = TWEAKS_DIR + (TWEAKS_DIR.endsWith("/") ? "" : "/");
+  // Drop cached require() entries that live inside the tweaks dir so a
+  // re-require on next load picks up fresh code.
   for (const key of Object.keys(require.cache)) {
-    if (key.startsWith(prefix)) delete require.cache[key];
+    try {
+      resolveInside(TWEAKS_DIR, key);
+      delete require.cache[key];
+    } catch {}
   }
 }
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/;
 
 async function ensureCodexPlusPlusUpdateCheck(force = false): Promise<CodexPlusPlusUpdateCheck> {
   const state = readState();
@@ -512,7 +574,7 @@ async function ensureCodexPlusPlusUpdateCheck(force = false): Promise<CodexPlusP
     releaseUrl: release.releaseUrl ?? `https://github.com/${CODEX_PLUSPLUS_REPO}/releases`,
     releaseNotes: release.releaseNotes,
     updateAvailable: latestVersion
-      ? compareVersions(normalizeVersion(latestVersion), CODEX_PLUSPLUS_VERSION) > 0
+      ? (compareVersions(normalizeVersion(latestVersion), CODEX_PLUSPLUS_VERSION) ?? 0) > 0
       : false,
     ...(release.error ? { error: release.error } : {}),
   };
@@ -546,7 +608,7 @@ async function ensureTweakUpdateCheck(t: DiscoveredTweak): Promise<void> {
     latestTag: next.latestTag,
     releaseUrl: next.releaseUrl,
     updateAvailable: latestVersion
-      ? compareVersions(latestVersion, normalizeVersion(t.manifest.version)) > 0
+      ? (compareVersions(latestVersion, normalizeVersion(t.manifest.version)) ?? 0) > 0
       : false,
     ...(next.error ? { error: next.error } : {}),
   };
@@ -595,21 +657,6 @@ async function fetchLatestRelease(
   }
 }
 
-function normalizeVersion(v: string): string {
-  return v.trim().replace(/^v/i, "");
-}
-
-function compareVersions(a: string, b: string): number {
-  const av = VERSION_RE.exec(a);
-  const bv = VERSION_RE.exec(b);
-  if (!av || !bv) return 0;
-  for (let i = 1; i <= 3; i++) {
-    const diff = Number(av[i]) - Number(bv[i]);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
 function broadcastReload(): void {
   const payload = {
     at: Date.now(),
@@ -633,37 +680,24 @@ function makeLogger(scope: string) {
   };
 }
 
-function makeMainIpc(id: string) {
-  const ch = (c: string) => `codexpp:${id}:${c}`;
-  return {
-    on: (c: string, h: (...args: unknown[]) => void) => {
-      const wrapped = (_e: unknown, ...args: unknown[]) => h(...args);
-      ipcMain.on(ch(c), wrapped);
-      return () => ipcMain.removeListener(ch(c), wrapped as never);
-    },
-    send: (_c: string) => {
-      throw new Error("ipc.send is renderer→main; main side uses handle/on");
-    },
-    invoke: (_c: string) => {
-      throw new Error("ipc.invoke is renderer→main; main side uses handle");
-    },
-    handle: (c: string, handler: (...args: unknown[]) => unknown) => {
-      ipcMain.handle(ch(c), (_e: unknown, ...args: unknown[]) => handler(...args));
-    },
-  };
+function makeMainIpc(id: string, disposers: Disposer[]) {
+  return createMainIpc(id, ipcMain, disposers, registeredMainHandles);
 }
 
 function makeMainFs(id: string) {
-  const dir = join(userRoot!, "tweak-data", id);
+  const dir = resolve(userRoot!, "tweak-data", id);
   mkdirSync(dir, { recursive: true });
   const fs = require("node:fs/promises") as typeof import("node:fs/promises");
   return {
     dataDir: dir,
-    read: (p: string) => fs.readFile(join(dir, p), "utf8"),
-    write: (p: string, c: string) => fs.writeFile(join(dir, p), c, "utf8"),
+    read: (p: string) =>
+      fs.readFile(resolveInside(dir, p, { mustExist: true, requireFile: true }), "utf8"),
+    write: (p: string, c: string) =>
+      fs.writeFile(resolveInside(dir, p), c, "utf8"),
     exists: async (p: string) => {
+      const full = resolveInside(dir, p);
       try {
-        await fs.access(join(dir, p));
+        await fs.access(full);
         return true;
       } catch {
         return false;
