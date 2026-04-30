@@ -41,7 +41,8 @@ schtasks /Query /TN codex-plusplus-watcher       # Windows
 
 In Codex Settings, open Codex Plus Plus -> Config. The Install Health section
 shows runtime version, tweak/log paths, reload status, and recent runtime error
-count. The Support & Maintenance section can open the tweak/log folders and copy
+count. The Support & Maintenance section can open the tweak/log folders, create
+and reveal an in-app redacted support bundle, copy diagnostics JSON, and copy
 the common support commands below.
 
 ```sh
@@ -50,6 +51,8 @@ codex-plusplus status --json
 codex-plusplus doctor --json
 codex-plusplus support bundle
 codex-plusplus tweaks list
+codex-plusplus tweaks list --json
+codex-plusplus tweaks list --verbose
 codex-plusplus tweaks open
 ```
 
@@ -62,12 +65,36 @@ output, redacted state/config summaries, and bounded log tails. It does not
 include tweak source, arbitrary file contents, environment variables, or app
 bundles.
 
+For UI review without a real Codex app, run:
+
+```sh
+npm run fixtures:settings --workspace @codex-plusplus/runtime
+npm run fixtures:settings:screenshots --workspace @codex-plusplus/runtime
+```
+
+The generated HTML/SVG artifacts land under
+`packages/runtime/visual-review/settings-ui/`.
+
 ## Windows install notes
 
 Use PowerShell, not Git Bash, for the Windows bootstrap:
 
 ```powershell
-irm https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/AppleLamps/codex-plusplus/main/install.ps1 | iex
+```
+
+Run the same script with support modes when you need to inspect or repair an
+install:
+
+```powershell
+.\install.ps1 -Check
+.\install.ps1 -Repair
+.\install.ps1 -Status
+.\install.ps1 -Doctor
+.\install.ps1 -SupportBundle
+.\install.ps1 -Uninstall
+.\install.ps1 -OpenTweaks
+.\install.ps1 -OpenLogs
 ```
 
 If Codex is installed in a non-standard location, run:
@@ -79,6 +106,25 @@ codex-plusplus install --app "C:\Path\To\Codex"
 Windows and Linux currently skip plist integrity writing because that
 ElectronAsarIntegrity metadata is macOS-specific. `status`, `status --json`,
 `doctor`, and `doctor --json` report when integrity was checked or skipped.
+
+Before `install`, `repair`, or `uninstall`, quit Codex completely. On Windows
+the installer checks for `Codex.exe` and stops with a close-and-retry message if
+the app is still running, because Windows can lock `app.asar` while Codex is
+open.
+
+If Codex updated and Tweaks disappeared:
+
+```powershell
+.\install.ps1 -Status
+.\install.ps1 -Doctor
+schtasks /Query /TN codex-plusplus-watcher
+.\install.ps1 -Repair
+```
+
+`status --json`, `doctor --json`, and support bundles include a Windows
+diagnostics section with Squirrel app candidates, the active app path, stale
+state detection, Task Scheduler status, running-process status, dependency
+versions, and the writable patch-target probe.
 
 ## "Tweaks" tab doesn't appear in Settings
 
@@ -110,6 +156,9 @@ Common causes:
 Tweaks with Main Process Access show a stronger warning. Codex++ asks for
 confirmation once per renderer session before enabling one, but this is a
 trust prompt only; it does not add a new OS sandbox.
+
+Use Trust details on a tweak row, or `codex-plusplus tweaks list --verbose`, to
+see short explanations for each computed capability label.
 
 ## Uninstall is incomplete
 

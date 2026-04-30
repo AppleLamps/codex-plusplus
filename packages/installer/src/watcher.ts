@@ -19,6 +19,8 @@ import { homedir, platform } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { userPaths } from "./paths.js";
+import { buildWindowsTaskCommand, writeWindowsRepairWrapper, batchQuote } from "./windows.js";
 
 export type WatcherKind = "launchd" | "login-item" | "scheduled-task" | "systemd" | "none";
 
@@ -179,8 +181,11 @@ function uninstallSystemd(): void {
 }
 
 function installScheduledTask(_appRoot: string): WatcherKind {
-  // schtasks.exe creates a logon-trigger task. We pass the repair command via /TR.
-  const repair = buildWindowsRepairCommand();
+  // schtasks.exe creates logon/daily tasks. Keep shell metacharacters out of
+  // /TR by pointing Task Scheduler at a generated wrapper in the user data dir.
+  const wrapper = windowsRepairWrapperPath();
+  writeWindowsRepairWrapper(wrapper, process.execPath, currentCliPath());
+  const repair = buildWindowsRepairCommand(process.execPath, currentCliPath(), wrapper);
   try {
     execFileSync("schtasks.exe", [
       "/Create",
@@ -234,12 +239,18 @@ function xmlEscape(value: string): string {
 export function buildWindowsRepairCommand(
   execPath = process.execPath,
   cliPath = currentCliPath(),
+  wrapperPath = windowsRepairWrapperPath(),
 ): string {
-  return `cmd /d /s /c ${windowsCommandArg(execPath)} ${windowsCommandArg(cliPath)} repair --quiet`;
+  writeWindowsRepairWrapper(wrapperPath, execPath, cliPath);
+  return buildWindowsTaskCommand(wrapperPath);
 }
 
 export function windowsCommandArg(value: string): string {
-  return `"${value.replace(/"/g, `""`)}"`;
+  return batchQuote(value);
+}
+
+export function windowsRepairWrapperPath(): string {
+  return join(userPaths().root, "codex-plusplus-repair.cmd");
 }
 
 function uninstallScheduledTask(): void {
@@ -252,5 +263,8 @@ function uninstallScheduledTask(): void {
     execFileSync("schtasks.exe", ["/Delete", "/F", "/TN", "codex-plusplus-watcher-daily"], {
       stdio: "ignore",
     });
+  } catch {}
+  try {
+    rmSync(windowsRepairWrapperPath(), { force: true });
   } catch {}
 }

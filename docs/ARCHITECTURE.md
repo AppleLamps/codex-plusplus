@@ -116,7 +116,9 @@ computed from existing manifest/runtime facts. They use friendly wording such as
 Renderer UI, Main Process Access, Local Data Storage, Custom Entry, and Runtime
 Requirement. They are trust hints for users and support debugging; they do not
 enforce additional OS sandboxing. The renderer asks for once-per-session
-confirmation before enabling a tweak that can run in the main process.
+confirmation before enabling a tweak that can run in the main process. The UI
+and `tweaks list --verbose` expose short Trust details descriptions for each
+label.
 
 ## Diagnostics
 
@@ -127,6 +129,12 @@ redacted directory containing status/doctor JSON, redacted state/config
 summaries, and bounded log tails. Support bundles exclude tweak source, arbitrary
 file contents, environment variables, secrets, and full app bundles.
 
+The runtime also exposes in-app diagnostics IPC for the Config page:
+`codexpp:runtime-health`, `codexpp:create-support-bundle`, and
+`codexpp:copy-diagnostics-json`. Runtime-created support bundles live under the
+Codex++ user data support directory and follow the same redaction and log-tail
+limits as CLI support bundles.
+
 ## Update handling
 
 When Codex auto-updates via Sparkle:
@@ -136,6 +144,18 @@ When Codex auto-updates via Sparkle:
 3. Our launchd / systemd / scheduled-task watcher fires (macOS and Linux watch `app.asar`; Windows runs at logon).
 4. The watcher runs `codex-plusplus repair --quiet`.
 5. `repair` is idempotent: if the current asar hash still matches `patchedAsarHash`, it exits without touching the app; if the hash drifted after an update, it re-runs the install patch against the new app bundle.
+
+On Windows, repair does not blindly trust the recorded `appRoot` because
+Squirrel updates create a new `%LOCALAPPDATA%\codex\app-<version>` directory.
+Codex++ scans valid `app-*` directories, sorts versions numerically, repairs
+the active/newest install unless `--app` is explicit, and reports stale recorded
+state in diagnostics. The scheduled task launches a generated repair wrapper
+from the Codex++ user data directory instead of embedding a fragile `cmd`
+command.
+
+Windows install, repair, and uninstall also check for a running `Codex.exe`
+before mutating `app.asar`; locked app files produce an actionable close-Codex
+message rather than a raw filesystem error.
 
 ## Codex++ self-updates
 

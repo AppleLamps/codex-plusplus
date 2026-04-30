@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { discoverWindowsInstalls, windowsCandidateFromPath } from "./windows.js";
 
 export type Platform = "darwin" | "win32" | "linux";
 
@@ -33,6 +34,21 @@ export function locateCodex(override?: string): CodexInstall {
   if (plat === "darwin") return locateMac(override);
   if (plat === "win32") return locateWin(override);
   return locateLinux(override);
+}
+
+export function locateCodexForState(
+  stateAppRoot?: string | null,
+  explicitOverride?: string,
+): CodexInstall {
+  const plat = detectPlatform();
+  if (explicitOverride) return locateCodex(explicitOverride);
+  if (plat !== "win32") return locateCodex(stateAppRoot ?? undefined);
+  try {
+    return locateWin();
+  } catch {
+    if (stateAppRoot) return locateWin(stateAppRoot);
+    throw new Error("Could not find Codex install. Pass --app to override.");
+  }
 }
 
 function locateMac(override?: string): CodexInstall {
@@ -70,23 +86,30 @@ function locateMac(override?: string): CodexInstall {
 }
 
 function locateWin(override?: string): CodexInstall {
-  // Squirrel.Windows installs under %LOCALAPPDATA%\codex\app-<version>\
-  const local = process.env.LOCALAPPDATA;
   const candidates: string[] = [];
-  if (override) candidates.push(override);
-  if (local) {
-    const codexDir = join(local, "codex");
-    if (existsSync(codexDir)) {
-      // pick highest app-* directory
-      try {
-        const entries = readdirSync(codexDir)
-          .filter((d) => d.startsWith("app-"))
-          .map((d) => join(codexDir, d))
-          .filter((p) => statSync(p).isDirectory());
-        entries.sort();
-        const latest = entries.at(-1);
-        if (latest) candidates.push(latest);
-      } catch {}
+  if (override) {
+    const explicit = windowsCandidateFromPath(override);
+    if (explicit.valid) {
+      candidates.push(explicit.appRoot);
+    } else {
+      const selected = discoverWindowsInstalls(override).selected;
+      candidates.push(selected?.appRoot ?? explicit.appRoot);
+    }
+  } else {
+    const selected = discoverWindowsInstalls().selected;
+    if (selected) candidates.push(selected.appRoot);
+    const local = process.env.LOCALAPPDATA;
+    if (local) {
+      const legacyRoot = join(local, "codex");
+      if (existsSync(legacyRoot) && candidates.length === 0) {
+        try {
+          const entries = readdirSync(legacyRoot)
+            .filter((d) => d.startsWith("app-"))
+            .map((d) => join(legacyRoot, d))
+            .filter((p) => statSync(p).isDirectory());
+          candidates.push(...entries);
+        } catch {}
+      }
     }
   }
   const appRoot = candidates.find((p) => existsSync(join(p, "resources", "app.asar")));

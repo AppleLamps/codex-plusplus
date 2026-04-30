@@ -1,6 +1,6 @@
 import { Window } from "happy-dom";
 
-export function setupSettingsDom(opts: { onConfirm?: () => boolean } = {}): void {
+export function setupSettingsDom(opts: { onConfirm?: () => boolean; width?: number } = {}): void {
   const window = new Window({ url: "https://codex.local/index.html?hostId=local" });
   window.confirm = opts.onConfirm ?? (() => true);
   window.location.reload = () => {};
@@ -18,10 +18,11 @@ export function setupSettingsDom(opts: { onConfirm?: () => boolean } = {}): void
     localStorage: window.localStorage,
   };
   Object.assign(globalThis, globals);
-  buildSettingsFixture();
+  buildSettingsFixture({ width: opts.width });
 }
 
-export function buildSettingsFixture(): void {
+export function buildSettingsFixture(opts: { width?: number } = {}): void {
+  const width = opts.width ?? 640;
   const shell = document.createElement("div");
   shell.className = "flex h-full";
 
@@ -42,11 +43,11 @@ export function buildSettingsFixture(): void {
   const content = document.createElement("main");
   content.appendChild(document.createElement("section")).textContent = "General settings";
   content.getBoundingClientRect = () => ({
-    width: 640,
+    width,
     height: 480,
     top: 0,
     left: 0,
-    right: 640,
+    right: width,
     bottom: 480,
     x: 0,
     y: 0,

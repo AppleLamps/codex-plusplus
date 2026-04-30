@@ -1,12 +1,13 @@
 import kleur from "kleur";
 import { ensureUserPaths } from "../paths.js";
 import { readState } from "../state.js";
-import { locateCodex } from "../platform.js";
+import { locateCodexForState } from "../platform.js";
 import { readHeaderHash } from "../asar.js";
 import { verifySignature } from "../codesign.js";
 import { existsSync, accessSync, constants } from "node:fs";
 import { basename } from "node:path";
 import { describeIntegritySupport } from "../integrity.js";
+import { windowsDiagnostics, type WindowsDiagnostics } from "../windows.js";
 
 interface Opts {
   json?: boolean;
@@ -23,6 +24,7 @@ export interface DoctorSnapshot {
   checks: Check[];
   failed: number;
   warnings: number;
+  windows: WindowsDiagnostics | null;
 }
 
 export async function doctor(opts: Opts = {}): Promise<void> {
@@ -39,6 +41,7 @@ export function collectDoctorChecks(): DoctorSnapshot {
   const checks: Check[] = [];
   const paths = ensureUserPaths();
   const state = readState(paths.stateFile);
+  const windows = windowsDiagnostics(state?.appRoot);
 
   checks.push({
     name: "user dir writable",
@@ -52,12 +55,12 @@ export function collectDoctorChecks(): DoctorSnapshot {
       ok: false,
       detail: "no state file — run `codex-plusplus install`",
     });
-    return snapshot(checks);
+    return snapshot(checks, windows);
   }
 
   let codex;
   try {
-    codex = locateCodex(state.appRoot);
+    codex = locateCodexForState(state.appRoot);
     checks.push({ name: "Codex.app present", ok: true, detail: codex.appRoot });
   } catch (e) {
     checks.push({
@@ -65,7 +68,7 @@ export function collectDoctorChecks(): DoctorSnapshot {
       ok: false,
       detail: (e as Error).message,
     });
-    return snapshot(checks);
+    return snapshot(checks, windows);
   }
 
   if (existsSync(codex.asarPath)) {
@@ -105,8 +108,39 @@ export function collectDoctorChecks(): DoctorSnapshot {
       detail: dir,
     });
   }
+  if (windows) {
+    checks.push({
+      name: "windows active app",
+      ok: windows.activeAppRoot ? true : false,
+      detail: windows.activeAppRoot ?? "no valid Squirrel app-* install found",
+    });
+    checks.push({
+      name: "windows state stale",
+      ok: windows.stateAppRootStale ? "warn" : true,
+      detail: windows.stateAppRootStale
+        ? `recorded ${windows.recordedAppRoot}; active ${windows.activeAppRoot}`
+        : "recorded app matches active install",
+    });
+    checks.push({
+      name: "Codex.exe running",
+      ok: windows.runningCodex.running === true ? "warn" : true,
+      detail: windows.runningCodex.detail,
+    });
+    checks.push({
+      name: "scheduled task",
+      ok: windows.scheduledTasks.installed && windows.scheduledTasks.dailyInstalled ? true : "warn",
+      detail: windows.scheduledTasks.detail,
+    });
+    if (windows.writableProbe) {
+      checks.push({
+        name: "windows app writable",
+        ok: windows.writableProbe.ok === true,
+        detail: windows.writableProbe.detail,
+      });
+    }
+  }
 
-  return snapshot(checks);
+  return snapshot(checks, windows);
 }
 
 export function diagnosticDirLabel(dir: string): string {
@@ -122,12 +156,13 @@ function tryWrite(p: string): boolean {
   }
 }
 
-function snapshot(checks: Check[]): DoctorSnapshot {
+function snapshot(checks: Check[], windows: WindowsDiagnostics | null): DoctorSnapshot {
   return {
     checkedAt: new Date().toISOString(),
     checks,
     failed: checks.filter((c) => c.ok === false).length,
     warnings: checks.filter((c) => c.ok === "warn").length,
+    windows,
   };
 }
 

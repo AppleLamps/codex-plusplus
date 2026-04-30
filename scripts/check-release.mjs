@@ -33,6 +33,7 @@ for (const rel of [
   "packages/installer/assets/runtime/path-security.js",
   "packages/installer/assets/runtime/health.js",
   "packages/installer/assets/runtime/main-ipc.js",
+  "packages/installer/assets/runtime/support-bundle.js",
 ]) {
   if (!existsSync(join(root, rel))) errors.push(`missing packaged runtime asset: ${rel}`);
 }

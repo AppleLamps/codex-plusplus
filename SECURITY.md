@@ -31,9 +31,17 @@ trust decision easier:
 - Renderer UI: can affect Codex's renderer/preload UI.
 - Main Process Access: can run in Electron's main process and is more powerful.
 - Local Data Storage: can read/write its own Codex++ data directory.
+- Scoped IPC: can communicate through Codex++ scoped IPC helpers.
 - Custom Entry: uses a non-default manifest entry file.
 - Runtime Requirement: declares a minimum Codex++ runtime.
 
 These labels are informational. They do not add OS-level sandboxing or make
 unreviewed tweak code safe. The UI asks once per session before enabling a
-main-process-capable tweak as a reminder to review the source.
+main-process-capable tweak as a reminder to review the source. The same
+descriptions are available in the in-app Trust details disclosure and
+`codex-plusplus tweaks list --verbose`.
+
+Support bundles created from Config or the CLI are redacted and bounded. They
+include diagnostics, paths, redacted state/config summaries, and log tails; they
+must not include tweak source files, arbitrary files, environment variables,
+secrets, full app bundles, or unbounded logs.

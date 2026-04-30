@@ -8,6 +8,7 @@ import { resolveUninstallAppRoot } from "../src/commands/uninstall";
 import { collectDoctorChecks, diagnosticDirLabel } from "../src/commands/doctor";
 import { collectStatus } from "../src/commands/status";
 import { supportBundle } from "../src/commands/support";
+import { tweaksList } from "../src/commands/tweaks";
 import { preflightProbePath } from "../src/commands/install";
 import { describeIntegritySupport } from "../src/integrity";
 import { openCommandForPath } from "../src/open-path";
@@ -15,6 +16,13 @@ import { listLocalTweaks } from "../src/tweak-manifest";
 import { injectLoader, requiredRuntimeAssetPaths, restoreFromBackup } from "../src/installer-core";
 import { readFileInAsar } from "../src/asar";
 import { buildWindowsRepairCommand, windowsCommandArg } from "../src/watcher";
+import {
+  assertWindowsCodexNotRunning,
+  discoverWindowsInstalls,
+  getWindowsCodexProcessStatus,
+  getWindowsScheduledTaskStatus,
+  windowsCandidateFromPath,
+} from "../src/windows";
 
 test("resolveUninstallAppRoot requires state or explicit app override", () => {
   assert.equal(resolveUninstallAppRoot("C:/Codex", undefined), "C:/Codex");
@@ -36,15 +44,63 @@ test("describeIntegritySupport is explicit by platform", () => {
   assert.match(win.detail, /not implemented/);
 });
 
-test("Windows watcher repair command quotes paths with spaces", () => {
-  const execPath = "C:\\Program Files\\nodejs\\node.exe";
-  const cliPath = "C:\\Users\\Me\\App Data\\codex-plusplus\\cli.js";
+test("Windows discovery semver-sorts Squirrel app directories", () => {
+  const root = tempDir();
+  try {
+    writeWindowsApp(root, "app-0.9.0");
+    writeWindowsApp(root, "app-0.10.0");
+    mkdirSync(join(root, "app-99.0.0"), { recursive: true });
+    writeFileSync(join(root, "not-app-100"), "");
+
+    const discovery = discoverWindowsInstalls(root);
+    assert.equal(discovery.selected?.version, "0.10.0");
+    assert.equal(discovery.candidates.find((c) => c.version === "99.0.0")?.valid, false);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("Windows discovery accepts Squirrel root overrides", () => {
+  const root = tempDir();
+  try {
+    writeWindowsApp(root, "app-1.2.0");
+    assert.equal(discoverWindowsInstalls(root).selected?.appRoot, join(root, "app-1.2.0"));
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("Windows watcher uses a wrapper script for metacharacter-heavy paths", () => {
+  const root = tempDir();
+  const execPath = "C:\\Program Files\\node&js\\node%.exe";
+  const cliPath = "C:\\Users\\Me (Work)\\codex^plusplus!\\cli.js";
+  const wrapper = join(root, "repair & run.cmd");
 
   assert.equal(windowsCommandArg(execPath), `"${execPath}"`);
-  assert.equal(
-    buildWindowsRepairCommand(execPath, cliPath),
-    `cmd /d /s /c "${execPath}" "${cliPath}" repair --quiet`,
+  assert.equal(buildWindowsRepairCommand(execPath, cliPath, wrapper), `"${wrapper}"`);
+  const body = readFileSync(wrapper, "utf8");
+  assert.match(body, /repair --quiet/);
+  assert.match(body, /node%%\.exe/);
+  assert.match(body, /codex\^plusplus!/);
+  cleanup(root);
+});
+
+test("Windows process status and running guard are injectable", () => {
+  const running = getWindowsCodexProcessStatus((() => `"Codex.exe","1234","Console"`) as never);
+  assert.equal(running.running, true);
+  const stopped = getWindowsCodexProcessStatus((() => "INFO: No tasks are running") as never);
+  assert.equal(stopped.running, false);
+  assert.throws(
+    () => assertWindowsCodexNotRunning("win32", () => ({ running: true, detail: "Codex.exe is running" })),
+    /Quit Codex/,
   );
+  assert.doesNotThrow(() => assertWindowsCodexNotRunning("linux"));
+});
+
+test("Windows scheduled task status is injectable", () => {
+  const status = getWindowsScheduledTaskStatus((() => "") as never);
+  assert.equal(status.installed, true);
+  assert.equal(status.dailyInstalled, true);
 });
 
 test("preflightProbePath selects platform-specific writable targets", () => {
@@ -72,8 +128,8 @@ test("openCommandForPath chooses platform opener without launching UI", () => {
     args: ["/tmp/tweaks"],
   });
   assert.deepEqual(openCommandForPath("C:\\Tweaks", "win32"), {
-    command: "cmd.exe",
-    args: ["/c", "start", "", "C:\\Tweaks"],
+    command: "explorer.exe",
+    args: ["C:\\Tweaks"],
   });
   assert.deepEqual(openCommandForPath("/tmp/tweaks", "linux"), {
     command: "xdg-open",
@@ -99,6 +155,35 @@ test("listLocalTweaks reports valid, missing, invalid, and incompatible tweaks",
     assert.equal(byId.get("future"), "incompatible");
     assert.deepEqual(valid?.capabilities.slice(0, 2), ["Renderer UI", "Main Process Access"]);
   } finally {
+    cleanup(root);
+  }
+});
+
+test("tweaks list supports JSON, grouped human output, and verbose trust details", async () => {
+  const root = tempDir();
+  const oldAppData = process.env.APPDATA;
+  const oldXdg = process.env.XDG_DATA_HOME;
+  try {
+    process.env.APPDATA = root;
+    process.env.XDG_DATA_HOME = root;
+    const userRoot = join(root, "codex-plusplus");
+    const tweaksRoot = join(userRoot, "tweaks");
+    writeTweak(tweaksRoot, "valid", {}, { "index.js": "" });
+    writeTweak(tweaksRoot, "future", { minRuntime: "99.0.0" }, { "index.js": "" });
+
+    const json = await captureConsole(() => tweaksList({ json: true }));
+    const parsed = JSON.parse(json);
+    assert.equal(parsed.dir, tweaksRoot);
+    assert.equal(parsed.tweaks.some((t: { id: string }) => t.id === "valid"), true);
+    assert.match(parsed.capabilityDescriptions["Main Process Access"], /main process/);
+
+    const human = await captureConsole(() => tweaksList({ verbose: true }));
+    assert.match(human, /Needs Attention/);
+    assert.match(human, /Ready/);
+    assert.match(human, /Main Process Access: can run code/);
+  } finally {
+    process.env.APPDATA = oldAppData;
+    process.env.XDG_DATA_HOME = oldXdg;
     cleanup(root);
   }
 });
@@ -263,12 +348,34 @@ function writeTweak(
   );
 }
 
+function writeWindowsApp(root: string, name: string): void {
+  const resources = join(root, name, "resources");
+  mkdirSync(resources, { recursive: true });
+  writeFileSync(join(resources, "app.asar"), "not a real asar");
+  writeFileSync(join(root, name, "Codex.exe"), "");
+  assert.equal(windowsCandidateFromPath(join(root, name)).valid, true);
+}
+
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "codexpp-installer-"));
 }
 
 function cleanup(path: string): void {
   rmSync(path, { recursive: true, force: true });
+}
+
+async function captureConsole(fn: () => void | Promise<void>): Promise<string> {
+  const oldLog = console.log;
+  const lines: string[] = [];
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = oldLog;
+  }
+  return lines.join("\n");
 }
 
 async function makeAsar(

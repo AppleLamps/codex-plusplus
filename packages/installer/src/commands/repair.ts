@@ -3,10 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { install, stageAssets } from "./install.js";
 import { ensureUserPaths } from "../paths.js";
 import { readState, writeState } from "../state.js";
-import { locateCodex } from "../platform.js";
+import { locateCodexForState } from "../platform.js";
 import { readHeaderHash } from "../asar.js";
 import { CODEX_PLUSPLUS_VERSION, compareSemver } from "../version.js";
 import { installWatcher } from "../watcher.js";
+import { assertWindowsCodexNotRunning, windowsMetadataForInstall } from "../windows.js";
 
 interface Opts {
   app?: string;
@@ -34,8 +35,10 @@ export async function repair(opts: Opts = {}): Promise<void> {
   }
 
   if (state && !opts.force) {
-    const codex = locateCodex(opts.app ?? state.appRoot);
+    const codex = locateCodexForState(state.appRoot, opts.app);
+    assertWindowsCodexNotRunning(codex.platform);
     const { headerHash } = readHeaderHash(codex.asarPath);
+    const windows = windowsMetadataForInstall(codex, opts.app ? "explicit" : "squirrel");
     if (headerHash === state.patchedAsarHash) {
       const watcher = refreshWatcher(state.watcher, codex.appRoot, opts.quiet);
       if (compareSemver(CODEX_PLUSPLUS_VERSION, state.version) > 0) {
@@ -46,9 +49,11 @@ export async function repair(opts: Opts = {}): Promise<void> {
         stageAssets(paths.runtime);
         writeState(paths.stateFile, {
           ...state,
+          appRoot: codex.appRoot,
           watcher,
           version: CODEX_PLUSPLUS_VERSION,
           runtimeUpdatedAt: new Date().toISOString(),
+          windows,
         });
         if (!opts.quiet) {
           console.log(
@@ -57,14 +62,14 @@ export async function repair(opts: Opts = {}): Promise<void> {
         }
         return;
       }
-      writeState(paths.stateFile, { ...state, watcher });
+      writeState(paths.stateFile, { ...state, appRoot: codex.appRoot, watcher, windows });
       if (!opts.quiet) console.log(kleur.green("Patch already intact."));
       return;
     }
   }
 
   await install({
-    app: opts.app ?? state?.appRoot,
+    app: opts.app,
     fuse: state?.fuseFlipped ?? true,
     resign: state?.resigned ?? true,
     watcher: state?.watcher === "none" ? false : true,

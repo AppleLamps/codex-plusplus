@@ -1,7 +1,7 @@
 import kleur from "kleur";
 import { ensureUserPaths } from "../paths.js";
 import { readState } from "../state.js";
-import { locateCodex } from "../platform.js";
+import { locateCodexForState } from "../platform.js";
 import { readHeaderHash } from "../asar.js";
 import { getIntegrity } from "../integrity.js";
 import { describeIntegritySupport } from "../integrity.js";
@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import type { UserPaths } from "../paths.js";
 import type { InstallerState } from "../state.js";
 import type { CodexInstall } from "../platform.js";
+import { windowsDiagnostics, type WindowsDiagnostics } from "../windows.js";
 
 interface Opts {
   json?: boolean;
@@ -39,6 +40,7 @@ export interface StatusSnapshot {
     asarFuse?: string;
     fuseError?: string;
   } | null;
+  windows: WindowsDiagnostics | null;
 }
 
 export async function status(opts: Opts = {}): Promise<void> {
@@ -70,6 +72,9 @@ export async function status(opts: Opts = {}): Promise<void> {
   console.log(`  fuse flipped: ${state.fuseFlipped}`);
   console.log(`  resigned:     ${state.resigned}`);
   console.log(`  watcher:      ${state.watcher}`);
+  if (state.windows) {
+    console.log(`  win app ver:  ${state.windows.appVersion ?? "(unknown)"}`);
+  }
   console.log();
 
   if (!snapshot.codex.found) {
@@ -100,6 +105,16 @@ export async function status(opts: Opts = {}): Promise<void> {
   } else if (integrity.fuseError) {
     console.log(kleur.dim(`  fuses:        unreadable (${integrity.fuseError})`));
   }
+  if (snapshot.windows) {
+    console.log();
+    console.log(kleur.bold("windows"));
+    console.log(`  active app:   ${snapshot.windows.activeAppRoot ?? "(not found)"}`);
+    console.log(`  stale state:  ${
+      snapshot.windows.stateAppRootStale ? kleur.yellow("yes") : "no"
+    }`);
+    console.log(`  codex open:   ${snapshot.windows.runningCodex.detail}`);
+    console.log(`  scheduler:    ${snapshot.windows.scheduledTasks.detail}`);
+  }
 }
 
 export function collectStatus(
@@ -116,12 +131,13 @@ export function collectStatus(
     install: state,
     codex: { found: false },
     integrity: null,
+    windows: windowsDiagnostics(state?.appRoot),
   };
   if (!state) return base;
 
   let codex: CodexInstall;
   try {
-    codex = locateCodex(state.appRoot);
+    codex = locateCodexForState(state.appRoot);
   } catch (e) {
     return {
       ...base,

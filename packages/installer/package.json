@@ -5,13 +5,13 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/b-nnett/codex-plusplus.git",
+    "url": "https://github.com/AppleLamps/codex-plusplus.git",
     "directory": "packages/installer"
   },
   "bugs": {
-    "url": "https://github.com/b-nnett/codex-plusplus/issues"
+    "url": "https://github.com/AppleLamps/codex-plusplus/issues"
   },
-  "homepage": "https://github.com/b-nnett/codex-plusplus#readme",
+  "homepage": "https://github.com/AppleLamps/codex-plusplus#readme",
   "bin": {
     "codex-plusplus": "dist/cli.js"
   },

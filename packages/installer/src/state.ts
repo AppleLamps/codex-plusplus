@@ -25,6 +25,12 @@ export interface InstallerState {
   watcher: "launchd" | "login-item" | "scheduled-task" | "systemd" | "none";
   /** Last time the user-dir runtime assets were refreshed by repair. */
   runtimeUpdatedAt?: string;
+  /** Windows-specific install metadata used to detect stale Squirrel app dirs. */
+  windows?: {
+    squirrelRoot: string | null;
+    appVersion: string | null;
+    appRootSource: "explicit" | "squirrel" | "state" | "unknown";
+  };
 }
 
 export function readState(stateFile: string): InstallerState | null {

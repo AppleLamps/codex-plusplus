@@ -12,7 +12,7 @@ export function openCommandForPath(
 ): OpenCommand {
   if (platform === "darwin") return { command: "open", args: [target] };
   if (platform === "win32") {
-    return { command: "cmd.exe", args: ["/c", "start", "", target] };
+    return { command: "explorer.exe", args: [target] };
   }
   return { command: "xdg-open", args: [target] };
 }

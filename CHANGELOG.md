@@ -6,6 +6,27 @@ This project uses semver for the installer, runtime, SDK, and published CLI pack
 
 ## Unreleased
 
+- Phase 6 Windows reliability:
+  - Added structured Squirrel install discovery, numeric `app-*` version
+    sorting, stale recorded app detection, and active-install repair targeting.
+  - Hardened Windows install/repair/uninstall around running `Codex.exe`,
+    permission failures, readable asar verification, and Task Scheduler repair
+    wrapper generation.
+  - Expanded Windows diagnostics in `status --json`, `doctor --json`, and
+    support bundles.
+  - Expanded `install.ps1` with `-Check`, `-Repair`, `-Uninstall`, `-Status`,
+    `-Doctor`, `-SupportBundle`, `-OpenTweaks`, and `-OpenLogs` modes plus a
+    Git-less zip fallback.
+  - Made root clean/CI paths more Windows-portable.
+- Phase 5 UI/UX hardening:
+  - Stabilized Tweaks search focus, Config async state, and real path fallback
+    behavior for support actions.
+  - Added stronger pending/disabled affordances, trust details, responsive
+    long-content handling, and consistent external-link routing.
+  - Added in-app support bundle creation, diagnostics JSON copying, and support
+    bundle reveal actions.
+  - Added `tweaks list --json`, `tweaks list --verbose`, grouped CLI output,
+    and deterministic settings UI visual review fixtures.
 - Phase 4 UI/UX pass:
   - Redesigned the in-app Tweaks page with grouped status sections, search,
     status filters, disabled unavailable toggles, and inline async feedback.

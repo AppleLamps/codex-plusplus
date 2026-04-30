@@ -43,11 +43,8 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Test
-        run: npm test
-
-      - name: Build
-        run: npm run build
+      - name: Check
+        run: npm run check
 
       - name: PowerShell bootstrap parses
         shell: pwsh
@@ -56,3 +53,9 @@ jobs:
           $errors = $null
           $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\install.ps1), [ref]$tokens, [ref]$errors)
           if ($errors.Count -gt 0) { $errors | Format-List; exit 1 }
+
+      - name: PowerShell bootstrap help/check
+        shell: pwsh
+        run: |
+          .\install.ps1 -Help
+          .\install.ps1 -Check

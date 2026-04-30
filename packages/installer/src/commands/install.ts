@@ -14,6 +14,7 @@ import { installWatcher, type WatcherKind } from "../watcher.js";
 import { CODEX_PLUSPLUS_VERSION } from "../version.js";
 import { installDefaultTweaks } from "../default-tweaks.js";
 import { injectLoader } from "../installer-core.js";
+import { assertWindowsCodexNotRunning, windowsMetadataForInstall } from "../windows.js";
 
 interface Opts {
   app?: string;
@@ -37,6 +38,7 @@ export async function install(opts: Opts = {}): Promise<void> {
   const step = makeStepper(opts.quiet === true);
   const codex = locateCodex(opts.app);
   step(`Located Codex at ${kleur.cyan(codex.appRoot)}`);
+  assertWindowsCodexNotRunning(codex.platform);
 
   // Pre-flight: try to create+remove a probe file inside the app bundle. This
   // surfaces macOS App Management TCC denials BEFORE we touch anything, and
@@ -136,6 +138,7 @@ export async function install(opts: Opts = {}): Promise<void> {
     resigned,
     originalEntryPoint: originalEntry,
     watcher,
+    windows: windowsMetadataForInstall(codex, opts.app ? "explicit" : "squirrel"),
   });
 
   if (!opts.quiet) {
@@ -211,7 +214,13 @@ export function preflightWritable(codex: Pick<CodexInstall, "appRoot" | "resourc
             `  2. Enable the toggle for your terminal app (Terminal, iTerm2, etc.)\n` +
             `  3. Re-run this command.\n\n` +
             `(If macOS just showed a permission dialog, click Allow and re-run.)\n`
-          : `Check filesystem permissions on the Codex install.\n`) +
+          : codex.platform === "win32"
+            ? `Windows could not write to the Codex install.\n` +
+              `Fix:\n` +
+              `  1. Quit Codex completely from the tray/taskbar if it is running\n` +
+              `  2. Re-run this command from PowerShell\n` +
+              `  3. If Codex is installed in a protected directory, re-run PowerShell as Administrator\n`
+            : `Check filesystem permissions on the Codex install.\n`) +
         `\nOriginal error: ${err.message}`;
       throw new Error(msg);
     }

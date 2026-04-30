@@ -25,7 +25,7 @@ function wrap<T extends (...args: never[]) => unknown | Promise<unknown>>(fn: T)
 
 const prog = sade("codex-plusplus")
   .version(CODEX_PLUSPLUS_VERSION)
-  .describe("Tweak system for the Codex desktop app");
+  .describe("Tweak system for Codex.app");
 
 prog
   .command("install")
@@ -72,6 +72,8 @@ prog
 prog
   .command("tweaks list")
   .describe("List local tweaks and manifest status")
+  .option("--json", "Emit machine-readable JSON")
+  .option("--verbose", "Show capability/trust descriptions")
   .action(wrap(tweaksList));
 
 prog

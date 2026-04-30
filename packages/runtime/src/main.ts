@@ -18,6 +18,7 @@ import { stopLoadedTweaks } from "./lifecycle";
 import { CODEX_PLUSPLUS_VERSION, compareVersions, normalizeVersion } from "./version";
 import { createMainIpc, type Disposer } from "./main-ipc";
 import { createRuntimeHealth, type RuntimeHealthEvent, type RuntimeReloadStatus } from "./health";
+import { createRuntimeSupportBundle, diagnosticsJson } from "./support-bundle";
 
 const userRoot = process.env.CODEX_PLUSPLUS_USER_ROOT;
 const runtimeDir = process.env.CODEX_PLUSPLUS_RUNTIME;
@@ -33,7 +34,8 @@ const TWEAKS_DIR = resolve(userRoot, "tweaks");
 const LOG_DIR = join(userRoot, "log");
 const LOG_FILE = join(LOG_DIR, "main.log");
 const CONFIG_FILE = join(userRoot, "config.json");
-const CODEX_PLUSPLUS_REPO = "b-nnett/codex-plusplus";
+const INSTALL_STATE_FILE = join(userRoot, "state.json");
+const CODEX_PLUSPLUS_REPO = "AppleLamps/codex-plusplus";
 
 mkdirSync(LOG_DIR, { recursive: true });
 mkdirSync(TWEAKS_DIR, { recursive: true });
@@ -290,11 +292,40 @@ ipcMain.handle("codexpp:check-codexpp-update", async (_e, force?: boolean) => {
   return ensureCodexPlusPlusUpdateCheck(force === true);
 });
 
-ipcMain.handle("codexpp:runtime-health", () =>
-  createRuntimeHealth({
-    version: CODEX_PLUSPLUS_VERSION,
+ipcMain.handle("codexpp:runtime-health", () => runtimeHealth());
+
+ipcMain.handle("codexpp:create-support-bundle", async () => {
+  const result = createRuntimeSupportBundle({
     userRoot,
     runtimeDir,
+    tweaksDir: TWEAKS_DIR,
+    logDir: LOG_DIR,
+    configFile: CONFIG_FILE,
+    stateFile: INSTALL_STATE_FILE,
+    runtimeHealth: runtimeHealth(),
+  });
+  return result;
+});
+
+ipcMain.handle("codexpp:copy-diagnostics-json", () => {
+  const json = diagnosticsJson({
+    userRoot,
+    runtimeDir,
+    tweaksDir: TWEAKS_DIR,
+    logDir: LOG_DIR,
+    configFile: CONFIG_FILE,
+    stateFile: INSTALL_STATE_FILE,
+    runtimeHealth: runtimeHealth(),
+  });
+  clipboard.writeText(json);
+  return { json };
+});
+
+function runtimeHealth() {
+  return createRuntimeHealth({
+    version: CODEX_PLUSPLUS_VERSION,
+    userRoot: userRoot!,
+    runtimeDir: runtimeDir!,
     tweaksDir: TWEAKS_DIR,
     logDir: LOG_DIR,
     discoveredTweaks: tweakState.discovered.length,
@@ -303,8 +334,8 @@ ipcMain.handle("codexpp:runtime-health", () =>
     startedAt: runtimeStartedAt,
     lastReload,
     recentErrors: recentRuntimeErrors,
-  }),
-);
+  });
+}
 
 // Sandboxed renderer preload can't use Node fs to read tweak source. Main
 // reads it on the renderer's behalf. Path must live under tweaksDir for
@@ -406,8 +437,8 @@ ipcMain.handle("codexpp:reveal", (_e, p: string) => {
 
 ipcMain.handle("codexpp:open-external", (_e, url: string) => {
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
-    throw new Error("only github.com links can be opened from tweak metadata");
+  if (!isAllowedExternalUrl(parsed)) {
+    throw new Error("only trusted https links can be opened from tweak metadata");
   }
   shell.openExternal(parsed.toString()).catch(() => {});
 });
@@ -423,6 +454,22 @@ ipcMain.handle("codexpp:reload-tweaks", async () => {
   await reloadTweaks("manual");
   return { at: Date.now(), count: tweakState.discovered.length };
 });
+
+function isAllowedExternalUrl(url: URL): boolean {
+  if (url.protocol !== "https:") return false;
+  if (url.hostname === "github.com") return true;
+  const normalized = url.toString();
+  return tweakState.discovered.some((t) => {
+    const homepage = t.manifest.homepage;
+    if (!homepage) return false;
+    try {
+      const parsed = new URL(homepage);
+      return parsed.protocol === "https:" && parsed.toString() === normalized;
+    } catch {
+      return false;
+    }
+  });
+}
 
 // 4. Filesystem watcher → debounced reload + broadcast.
 //    We watch the tweaks dir for any change. On the first tick of inactivity

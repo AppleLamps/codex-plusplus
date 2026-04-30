@@ -1,7 +1,7 @@
 import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { patchAsar } from "./asar.js";
+import { patchAsar, readHeaderHash } from "./asar.js";
 import type { CodexInstall } from "./platform.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -55,15 +55,32 @@ export function restoreFromBackup(
     throw new Error(`No backup found at ${backupAsar}. Cannot safely uninstall.`);
   }
 
-  cpSync(backupAsar, codex.asarPath);
+  try {
+    cpSync(backupAsar, codex.asarPath);
+    readHeaderHash(codex.asarPath);
+  } catch (e) {
+    throw annotateRestoreError(e, codex.asarPath);
+  }
   if (existsSync(backupAsarUnpacked)) {
-    cpSync(backupAsarUnpacked, `${codex.asarPath}.unpacked`, { recursive: true });
+    try {
+      cpSync(backupAsarUnpacked, `${codex.asarPath}.unpacked`, { recursive: true });
+    } catch (e) {
+      throw annotateRestoreError(e, `${codex.asarPath}.unpacked`);
+    }
   }
   if (codex.metaPath && backupPlist && existsSync(backupPlist)) {
-    cpSync(backupPlist, codex.metaPath);
+    try {
+      cpSync(backupPlist, codex.metaPath);
+    } catch (e) {
+      throw annotateRestoreError(e, codex.metaPath);
+    }
   }
   if (existsSync(backupFramework)) {
-    cpSync(backupFramework, codex.electronBinary);
+    try {
+      cpSync(backupFramework, codex.electronBinary);
+    } catch (e) {
+      throw annotateRestoreError(e, codex.electronBinary);
+    }
   }
 }
 
@@ -74,6 +91,7 @@ export function requiredRuntimeAssetPaths(runtimeAssetsDir = join(assetsDir, "ru
     join(runtimeAssetsDir, "path-security.js"),
     join(runtimeAssetsDir, "health.js"),
     join(runtimeAssetsDir, "main-ipc.js"),
+    join(runtimeAssetsDir, "support-bundle.js"),
   ];
 }
 
@@ -89,4 +107,17 @@ function resolveLoaderPath(): string {
   }
 
   throw new Error(`loader.cjs not found at ${loaderSrc} or development fallback paths`);
+}
+
+function annotateRestoreError(e: unknown, target: string): Error {
+  const err = e as NodeJS.ErrnoException;
+  if (err && (err.code === "EPERM" || err.code === "EACCES") && process.platform === "win32") {
+    return new Error(
+      `Permission denied restoring ${target}.\n\n` +
+        `Quit Codex completely, then re-run uninstall from PowerShell. ` +
+        `If Codex is installed in a protected directory, run PowerShell as Administrator.\n\n` +
+        `Original error: ${err.message}`,
+    );
+  }
+  return err instanceof Error ? err : new Error(String(err));
 }

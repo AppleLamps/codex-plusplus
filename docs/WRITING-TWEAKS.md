@@ -6,7 +6,7 @@ A tweak is a folder containing `manifest.json` and an entry script. Drop it into
 - Linux: `~/.local/share/codex-plusplus/tweaks/`
 - Windows: `%APPDATA%/codex-plusplus/tweaks/`
 
-…then reload Codex (Cmd/Ctrl+R in the window, or restart the app). The Tweak Manager (in Settings → Tweaks) groups discovered tweaks by Needs Attention, Updates Available, Enabled, and Disabled. It also shows computed capability labels such as Renderer UI, Main Process Access, Local Data Storage, Custom Entry, and Runtime Requirement. Those labels are informational trust hints, not extra sandbox enforcement.
+…then reload Codex (Cmd/Ctrl+R in the window, or restart the app). The Tweak Manager (in Settings → Tweaks) groups discovered tweaks by Needs Attention, Updates Available, Enabled, and Disabled. It also shows computed capability labels such as Renderer UI, Main Process Access, Local Data Storage, Custom Entry, and Runtime Requirement. Open Trust details on a tweak row for short explanations of those labels. They are informational trust hints, not extra sandbox enforcement.
 
 ## Minimal example
 
@@ -206,4 +206,5 @@ addEventListener("keydown", (e) => {
 - `codex-plusplus doctor` from a terminal for installer/integrity issues.
 - `codex-plusplus doctor --json` for machine-readable checks.
 - `codex-plusplus support bundle` for a redacted support directory with diagnostics and bounded log tails.
-- Settings → Codex Plus Plus → Config for install health, recent runtime issues, and copyable support commands.
+- `codex-plusplus tweaks list --json` or `codex-plusplus tweaks list --verbose` for manifest/support triage.
+- Settings → Codex Plus Plus → Config for install health, recent runtime issues, in-app support bundle creation, diagnostics JSON, and copyable support commands.

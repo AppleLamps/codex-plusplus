@@ -12,6 +12,7 @@ import { collectDoctorChecks } from "./doctor.js";
 import { collectStatus } from "./status.js";
 import { ensureUserPaths } from "../paths.js";
 import { readState } from "../state.js";
+import { windowsDiagnostics } from "../windows.js";
 
 interface Opts {
   out?: string;
@@ -29,6 +30,9 @@ export async function supportBundle(opts: Opts = {}): Promise<void> {
 
   writeJson(join(dir, "status.json"), collectStatus(paths, readState(paths.stateFile)));
   writeJson(join(dir, "doctor.json"), collectDoctorChecks());
+  const state = readState(paths.stateFile);
+  const windows = windowsDiagnostics(state?.appRoot);
+  if (windows) writeJson(join(dir, "windows.json"), windows);
   writeJson(join(dir, "paths.json"), {
     root: paths.root,
     runtime: paths.runtime,

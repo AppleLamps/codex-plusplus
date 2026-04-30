@@ -6,6 +6,8 @@
   "description": "In-app runtime: discovers tweaks, injects settings UI, hot-reloads.",
   "scripts": {
     "build": "node ./scripts/clean-dist.mjs && tsc -p tsconfig.json && node ./scripts/bundle-renderer.mjs",
+    "fixtures:settings": "tsx scripts/render-settings-fixtures.ts",
+    "fixtures:settings:screenshots": "tsx scripts/render-settings-fixtures.ts --screenshots",
     "test": "node --test --import tsx \"test/**/*.test.ts\""
   },
   "dependencies": {

@@ -6,6 +6,7 @@ import { readState } from "../state.js";
 import { adHocSign } from "../codesign.js";
 import { uninstallWatcher } from "../watcher.js";
 import { restoreFromBackup } from "../installer-core.js";
+import { assertWindowsCodexNotRunning } from "../windows.js";
 
 interface Opts {
   app?: string;
@@ -15,6 +16,7 @@ export async function uninstall(opts: Opts = {}): Promise<void> {
   const paths = ensureUserPaths();
   const state = readState(paths.stateFile);
   const codex = locateCodex(resolveUninstallAppRoot(opts.app, state?.appRoot));
+  assertWindowsCodexNotRunning(codex.platform);
 
   restoreFromBackup(codex, paths.backup);
   console.log(kleur.green("Restored Codex.app from backup."));

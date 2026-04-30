@@ -87,6 +87,17 @@ interface RuntimeHealth {
   recentErrors: Array<{ at: string; level: "warn" | "error"; message: string }>;
 }
 
+interface UserPaths {
+  userRoot: string;
+  runtimeDir: string;
+  tweaksDir: string;
+  logDir: string;
+}
+
+interface SupportBundleResult {
+  dir: string;
+}
+
 type TweakStatusFilter = "all" | "attention" | "updates" | "enabled" | "disabled";
 type FeedbackKind = "info" | "success" | "error";
 
@@ -135,6 +146,10 @@ interface InjectorState {
   tweaksFilter: TweakStatusFilter;
   feedback: Map<string, { kind: FeedbackKind; message: string }>;
   confirmedMainTweaks: Set<string>;
+  configRequestToken: number;
+  healthRequestToken: number;
+  updateRequestToken: number;
+  lastSupportBundleDir: string | null;
 }
 
 const state: InjectorState = {
@@ -157,6 +172,10 @@ const state: InjectorState = {
   tweaksFilter: "all",
   feedback: new Map(),
   confirmedMainTweaks: new Set(),
+  configRequestToken: 0,
+  healthRequestToken: 0,
+  updateRequestToken: 0,
+  lastSupportBundleDir: null,
 };
 
 function plog(msg: string, extra?: unknown): void {
@@ -239,6 +258,10 @@ export function __resetSettingsInjectorForTests(): void {
   state.tweaksFilter = "all";
   state.feedback.clear();
   state.confirmedMainTweaks.clear();
+  state.configRequestToken = 0;
+  state.healthRequestToken = 0;
+  state.updateRequestToken = 0;
+  state.lastSupportBundleDir = null;
 }
 
 function onNav(): void {
@@ -694,6 +717,7 @@ function rerender(): void {
 // ───────────────────────────────────────────────────────────── pages ──
 
 function renderConfigPage(sectionsWrap: HTMLElement): void {
+  const configToken = ++state.configRequestToken;
   const section = document.createElement("section");
   section.className = "flex flex-col gap-2";
   section.appendChild(sectionTitle("Codex++ Updates"));
@@ -706,12 +730,14 @@ function renderConfigPage(sectionsWrap: HTMLElement): void {
   void ipcRenderer
     .invoke("codexpp:get-config")
     .then((config) => {
+      if (configToken !== state.configRequestToken || !card.isConnected) return;
       card.textContent = "";
       renderCodexPlusPlusConfig(card, config as CodexPlusPlusConfig);
     })
     .catch((e) => {
+      if (configToken !== state.configRequestToken || !card.isConnected) return;
       card.textContent = "";
-      card.appendChild(rowSimple("Could not load update settings", String(e)));
+      card.appendChild(errorRow("Could not load update settings", String(e)));
     });
 
   renderInstallHealth(sectionsWrap);
@@ -734,10 +760,41 @@ function renderConfigPage(sectionsWrap: HTMLElement): void {
     "Open Codex++ runtime logs for local debugging.",
     "Open",
     () => invokeAction("maintenance:open-logs", "Opening logs", "Opened logs.", async () => {
-      const health = await loadRuntimeHealth();
-      await ipcRenderer.invoke("codexpp:reveal", health?.paths.logDir ?? "<user dir>/log");
+      const paths = await loadUserPaths();
+      if (!paths?.logDir) throw new Error("Log directory is unavailable.");
+      await ipcRenderer.invoke("codexpp:reveal", paths.logDir);
     }),
     "maintenance:open-logs",
+  ));
+  maintenanceCard.appendChild(maintenanceActionRow(
+    "Create support bundle",
+    "Create a redacted diagnostics folder and copy its path.",
+    "Create",
+    () => invokeAction("maintenance:create-support", "Creating support bundle", "Support bundle created and path copied.", async () => {
+      const result = await ipcRenderer.invoke("codexpp:create-support-bundle") as SupportBundleResult;
+      state.lastSupportBundleDir = result.dir;
+      await ipcRenderer.invoke("codexpp:copy-text", result.dir);
+    }),
+    "maintenance:create-support",
+  ));
+  maintenanceCard.appendChild(maintenanceActionRow(
+    "Reveal support bundle",
+    "Open the most recent in-app support bundle.",
+    "Reveal",
+    () => invokeAction("maintenance:reveal-support", "Opening support bundle", "Opened support bundle.", async () => {
+      if (!state.lastSupportBundleDir) throw new Error("Create a support bundle first.");
+      await ipcRenderer.invoke("codexpp:reveal", state.lastSupportBundleDir);
+    }),
+    "maintenance:reveal-support",
+  ));
+  maintenanceCard.appendChild(maintenanceActionRow(
+    "Copy diagnostics JSON",
+    "Copy redacted runtime diagnostics for support.",
+    "Copy",
+    () => invokeAction("maintenance:copy-diagnostics", "Copying diagnostics", "Diagnostics copied.", () =>
+      ipcRenderer.invoke("codexpp:copy-diagnostics-json"),
+    ),
+    "maintenance:copy-diagnostics",
   ));
   maintenanceCard.appendChild(copyCommandRow("Copy status command", "Machine-readable install status.", "codex-plusplus status --json"));
   maintenanceCard.appendChild(copyCommandRow("Copy support bundle command", "Redacted support diagnostics.", "codex-plusplus support bundle"));
@@ -748,6 +805,7 @@ function renderConfigPage(sectionsWrap: HTMLElement): void {
 }
 
 function renderInstallHealth(sectionsWrap: HTMLElement): void {
+  const healthToken = ++state.healthRequestToken;
   const section = document.createElement("section");
   section.className = "flex flex-col gap-2";
   section.appendChild(sectionTitle("Install Health"));
@@ -758,6 +816,7 @@ function renderInstallHealth(sectionsWrap: HTMLElement): void {
 
   void loadRuntimeHealth()
     .then((health) => {
+      if (healthToken !== state.healthRequestToken || !card.isConnected) return;
       card.textContent = "";
       if (!health) {
         card.appendChild(errorRow("Runtime health unavailable", "Codex++ could not read runtime diagnostics from the main process."));
@@ -787,6 +846,7 @@ function renderInstallHealth(sectionsWrap: HTMLElement): void {
       }
     })
     .catch((e) => {
+      if (healthToken !== state.healthRequestToken || !card.isConnected) return;
       card.textContent = "";
       card.appendChild(errorRow("Could not load runtime health", String(e)));
     });
@@ -795,6 +855,12 @@ function renderInstallHealth(sectionsWrap: HTMLElement): void {
 function renderCodexPlusPlusConfig(card: HTMLElement, config: CodexPlusPlusConfig): void {
   card.appendChild(autoUpdateRow(config));
   card.appendChild(checkForUpdatesRow(config.updateCheck));
+  const updateFeedback = state.feedback.get("config:update-check");
+  if (updateFeedback) {
+    const row = noticeRow("Update check", updateFeedback.message, updateFeedback.kind);
+    row.dataset.codexppUpdateFeedback = "true";
+    card.appendChild(row);
+  }
   if (config.updateCheck) card.appendChild(releaseNotesRow(config.updateCheck));
 }
 
@@ -840,26 +906,39 @@ function checkForUpdatesRow(check: CodexPlusPlusUpdateCheck | null): HTMLElement
   if (check?.releaseUrl) {
     actions.appendChild(
       compactButton("Release Notes", () => {
-        void ipcRenderer.invoke("codexpp:open-external", check.releaseUrl);
+        void openExternal(check.releaseUrl!);
       }),
     );
   }
   actions.appendChild(
     actionButton("Check Now", "Check for Codex++ updates", async (btn) => {
+      const updateToken = ++state.updateRequestToken;
       setButtonPending(btn, true, "Checking");
+      state.feedback.set("config:update-check", { kind: "info", message: "Checking for Codex++ updates..." });
       try {
         const next = await ipcRenderer.invoke("codexpp:check-codexpp-update", true);
+        if (updateToken !== state.updateRequestToken || !row.isConnected) return;
         const card = row.parentElement;
         if (!card) return;
+        state.feedback.delete("config:update-check");
         card.textContent = "";
         const config = await ipcRenderer.invoke("codexpp:get-config");
+        if (updateToken !== state.updateRequestToken || !card.isConnected) return;
         renderCodexPlusPlusConfig(card, {
           ...(config as CodexPlusPlusConfig),
           updateCheck: next as CodexPlusPlusUpdateCheck,
         });
       } catch (e) {
+        if (updateToken !== state.updateRequestToken || !row.isConnected) return;
         plog("Codex++ update check failed", String(e));
-        row.insertAdjacentElement("afterend", errorRow("Update check failed", String(e)));
+        state.feedback.set("config:update-check", { kind: "error", message: `Update check failed: ${String(e)}` });
+        const card = row.parentElement;
+        if (card) {
+          card.querySelector('[data-codexpp-update-feedback="true"]')?.remove();
+          const feedback = noticeRow("Update check", `Update check failed: ${String(e)}`, "error");
+          feedback.dataset.codexppUpdateFeedback = "true";
+          row.insertAdjacentElement("afterend", feedback);
+        }
       } finally {
         setButtonPending(btn, false);
       }
@@ -915,10 +994,7 @@ function reportBugRow(): HTMLElement {
           "Run `codex-plusplus support bundle` and attach relevant redacted output.",
         ].join("\n"),
       );
-      void ipcRenderer.invoke(
-        "codexpp:open-external",
-        `https://github.com/b-nnett/codex-plusplus/issues/new?title=${title}&body=${body}`,
-      );
+      void openExternal(`https://github.com/AppleLamps/codex-plusplus/issues/new?title=${title}&body=${body}`);
     },
   );
 }
@@ -1018,14 +1094,18 @@ function tweaksToolbar(): HTMLElement {
 
   const search = document.createElement("input");
   search.type = "search";
+  search.dataset.codexppSearch = "tweaks";
   search.value = state.tweaksSearch;
   search.placeholder = "Search tweaks";
   search.setAttribute("aria-label", "Search tweaks");
   search.className =
     "border-token-border h-8 min-w-48 flex-1 rounded-lg border bg-transparent px-2 text-sm text-token-text-primary outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border";
   search.addEventListener("input", () => {
+    const selectionStart = search.selectionStart ?? search.value.length;
+    const selectionEnd = search.selectionEnd ?? selectionStart;
     state.tweaksSearch = search.value;
     rerender();
+    restoreSearchFocus(selectionStart, selectionEnd);
   });
   toolbar.appendChild(search);
 
@@ -1033,7 +1113,6 @@ function tweaksToolbar(): HTMLElement {
   toolbar.appendChild(iconButton("Reload tweaks", refreshIconSvg(), async (btn) => {
     setButtonPending(btn, true, "Reloading");
     state.feedback.set("tweaks:global", { kind: "info", message: "Reloading tweaks..." });
-    rerender();
     try {
       await ipcRenderer.invoke("codexpp:reload-tweaks");
       state.feedback.set("tweaks:global", { kind: "success", message: "Tweaks reloaded. Reloading window..." });
@@ -1103,7 +1182,7 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
   if (!t.enabled || !t.loadable) cell.style.opacity = "0.7";
 
   const header = document.createElement("div");
-  header.className = "flex items-start justify-between gap-4 p-3";
+  header.className = "flex flex-col gap-3 p-3 sm:flex-row sm:items-start sm:justify-between";
 
   const left = document.createElement("div");
   left.className = "flex min-w-0 flex-1 items-start gap-3";
@@ -1152,9 +1231,9 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
   stack.className = "flex min-w-0 flex-col gap-0.5";
 
   const titleRow = document.createElement("div");
-  titleRow.className = "flex items-center gap-2";
+  titleRow.className = "flex min-w-0 flex-wrap items-center gap-2";
   const name = document.createElement("div");
-  name.className = "min-w-0 text-sm font-medium text-token-text-primary";
+  name.className = "min-w-0 break-words text-sm font-medium text-token-text-primary";
   name.textContent = m.name;
   titleRow.appendChild(name);
   if (m.version) {
@@ -1175,10 +1254,13 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
   }
   stack.appendChild(titleRow);
 
-  if (t.loadError) {
+  const loadReason = t.loadError || (!t.entryExists ? "Entry file is missing." : "");
+  const loadReasonId = loadReason ? `codexpp-load-reason-${safeDomId(m.id)}` : undefined;
+  if (loadReason) {
     const desc = document.createElement("div");
+    if (loadReasonId) desc.id = loadReasonId;
     desc.className = "text-token-text-secondary min-w-0 text-sm";
-    desc.textContent = t.loadError;
+    desc.textContent = loadReason;
     stack.appendChild(desc);
   } else if (m.description) {
     const desc = document.createElement("div");
@@ -1188,30 +1270,33 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
   }
 
   const meta = document.createElement("div");
-  meta.className = "flex items-center gap-2 text-xs text-token-text-secondary";
+  meta.className = "flex min-w-0 flex-wrap items-center gap-2 text-xs text-token-text-secondary";
   const authorEl = renderAuthor(m.author);
   if (authorEl) meta.appendChild(authorEl);
   if (m.githubRepo) {
     if (meta.children.length > 0) meta.appendChild(dot());
     const repo = document.createElement("button");
     repo.type = "button";
-    repo.className = "inline-flex text-token-text-link-foreground hover:underline";
+    repo.className = "inline-flex min-w-0 break-all text-token-text-link-foreground hover:underline";
     repo.textContent = m.githubRepo;
     repo.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      void ipcRenderer.invoke("codexpp:open-external", `https://github.com/${m.githubRepo}`);
+      void openExternal(`https://github.com/${m.githubRepo}`);
     });
     meta.appendChild(repo);
   }
   if (m.homepage) {
     if (meta.children.length > 0) meta.appendChild(dot());
-    const link = document.createElement("a");
-    link.href = m.homepage;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.className = "inline-flex text-token-text-link-foreground hover:underline";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "inline-flex min-w-0 break-all text-token-text-link-foreground hover:underline";
     link.textContent = "Homepage";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void openExternal(m.homepage!);
+    });
     meta.appendChild(link);
   }
   if (meta.children.length > 0) stack.appendChild(meta);
@@ -1243,6 +1328,7 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
     capRow.className = "flex flex-wrap items-center gap-1 pt-0.5";
     for (const cap of friendlyCapabilities) capRow.appendChild(statusBadge(cap, "muted"));
     stack.appendChild(capRow);
+    stack.appendChild(trustDetails(friendlyCapabilities));
   }
 
   const feedback = state.feedback.get(`tweak:${m.id}`);
@@ -1253,11 +1339,11 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
 
   // ── Toggle ────────────────────────────────────────────────────────────
   const right = document.createElement("div");
-  right.className = "flex shrink-0 items-center gap-2 pt-0.5";
+  right.className = "flex shrink-0 flex-wrap items-center gap-2 pt-0.5 sm:justify-end";
   if (t.update?.updateAvailable && t.update.releaseUrl) {
     right.appendChild(
       compactButton("View Release", () => {
-        void ipcRenderer.invoke("codexpp:open-external", t.update!.releaseUrl);
+        void openExternal(t.update!.releaseUrl!);
       }),
     );
   }
@@ -1296,6 +1382,7 @@ function tweakRow(t: ListedTweak, sections: SettingsSection[]): HTMLElement {
     }, {
       disabled: !t.loadable || !t.entryExists,
       ariaLabel: `${t.enabled ? "Disable" : "Enable"} ${m.name}`,
+      describedBy: loadReasonId,
     });
   right.appendChild(toggle);
   header.appendChild(right);
@@ -1416,6 +1503,40 @@ function friendlyCapabilityLabels(capabilities: string[]): string[] {
   return [...new Set(labels)];
 }
 
+function trustDetails(capabilities: string[]): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "pt-1 text-xs text-token-text-secondary";
+  const summary = document.createElement("summary");
+  summary.className = "cursor-pointer text-token-text-primary";
+  summary.textContent = "Trust details";
+  details.appendChild(summary);
+  const list = document.createElement("ul");
+  list.className = "mt-1 flex flex-col gap-1";
+  for (const cap of capabilities) {
+    const item = document.createElement("li");
+    item.textContent = `${cap}: ${capabilityDescription(cap)}`;
+    list.appendChild(item);
+  }
+  details.appendChild(list);
+  return details;
+}
+
+function capabilityDescription(label: string): string {
+  const descriptions: Record<string, string> = {
+    "Renderer UI": "can add renderer-side UI and settings.",
+    "Main Process Access": "can run code in Codex's main process.",
+    "Local Data Storage": "can read and write its own Codex++ data.",
+    "Scoped IPC": "can communicate through Codex++ scoped IPC helpers.",
+    "Custom Entry": "uses a custom manifest entry file.",
+    "Runtime Requirement": "declares a minimum Codex++ runtime version.",
+  };
+  return descriptions[label] ?? "reported by the tweak manifest.";
+}
+
+function safeDomId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "-");
+}
+
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
@@ -1423,6 +1544,26 @@ function formatDate(value: string): string {
 
 async function loadRuntimeHealth(): Promise<RuntimeHealth | null> {
   return (await ipcRenderer.invoke("codexpp:runtime-health").catch(() => null)) as RuntimeHealth | null;
+}
+
+async function loadUserPaths(): Promise<UserPaths | null> {
+  const paths = await ipcRenderer.invoke("codexpp:user-paths").catch(() => null);
+  return paths as UserPaths | null;
+}
+
+async function openExternal(url: string): Promise<void> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error("Only https links can be opened.");
+  await ipcRenderer.invoke("codexpp:open-external", parsed.toString());
+}
+
+function restoreSearchFocus(selectionStart: number, selectionEnd: number): void {
+  const next = document.querySelector<HTMLInputElement>('input[data-codexpp-search="tweaks"]');
+  if (!next) return;
+  next.focus();
+  try {
+    next.setSelectionRange(selectionStart, selectionEnd);
+  } catch {}
 }
 
 async function invokeAction(
@@ -1568,28 +1709,6 @@ function inlineFeedback(kind: FeedbackKind, message: string): HTMLElement {
   return el;
 }
 
-/**
- * Codex's "Open config.toml"-style trailing button: ghost border, muted
- * label, top-right diagonal arrow icon. Markup mirrors Configuration panel.
- */
-function openInPlaceButton(label: string, onClick: () => void): HTMLButtonElement {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className =
-    "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-lg text-token-description-foreground enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
-  btn.innerHTML =
-    `${label}` +
-    `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-2xs" aria-hidden="true">` +
-    `<path d="M14.3349 13.3301V6.60645L5.47065 15.4707C5.21095 15.7304 4.78895 15.7304 4.52925 15.4707C4.26955 15.211 4.26955 14.789 4.52925 14.5293L13.3935 5.66504H6.66011C6.29284 5.66504 5.99507 5.36727 5.99507 5C5.99507 4.63273 6.29284 4.33496 6.66011 4.33496H14.9999L15.1337 4.34863C15.4369 4.41057 15.665 4.67857 15.665 5V13.3301C15.6649 13.6973 15.3672 13.9951 14.9999 13.9951C14.6327 13.9951 14.335 13.6973 14.3349 13.3301Z" fill="currentColor"></path>` +
-    `</svg>`;
-  btn.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onClick();
-  });
-  return btn;
-}
-
 function compactButton(label: string, onClick: () => void): HTMLButtonElement {
   return actionButton(label, label, (_btn) => {
     onClick();
@@ -1626,13 +1745,19 @@ function iconButton(
     "border-token-border user-select-none no-drag cursor-interaction inline-flex h-8 w-8 items-center justify-center rounded-lg border text-token-text-primary enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
   btn.innerHTML = iconSvg;
   btn.dataset.codexppLabel = "";
+  btn.dataset.codexppIcon = iconSvg;
+  btn.dataset.codexppPendingLabel = label;
   return btn;
 }
 
 function setButtonPending(btn: HTMLButtonElement, pending: boolean, label = "Working"): void {
   btn.disabled = pending;
+  btn.setAttribute("aria-busy", String(pending));
   if (btn.dataset.codexppLabel) {
     btn.textContent = pending ? label : btn.dataset.codexppLabel;
+  } else if (btn.dataset.codexppIcon) {
+    btn.innerHTML = pending ? spinnerIconSvg() : btn.dataset.codexppIcon;
+    btn.title = pending ? label : (btn.dataset.codexppPendingLabel ?? "");
   }
 }
 
@@ -1678,12 +1803,13 @@ function rowSimple(title: string | undefined, description?: string): HTMLElement
 function switchControl(
   initial: boolean,
   onChange: (next: boolean) => boolean | void | Promise<boolean | void>,
-  opts: { disabled?: boolean; ariaLabel?: string } = {},
+  opts: { disabled?: boolean; ariaLabel?: string; describedBy?: string } = {},
 ): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.setAttribute("role", "switch");
   if (opts.ariaLabel) btn.setAttribute("aria-label", opts.ariaLabel);
+  if (opts.describedBy) btn.setAttribute("aria-describedby", opts.describedBy);
 
   const pill = document.createElement("span");
   const knob = document.createElement("span");
@@ -1695,9 +1821,9 @@ function switchControl(
     btn.setAttribute("aria-checked", String(on));
     btn.dataset.state = on ? "checked" : "unchecked";
     btn.className =
-      "inline-flex items-center text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border focus-visible:rounded-full cursor-interaction";
+      "inline-flex items-center text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border focus-visible:rounded-full cursor-interaction disabled:cursor-not-allowed disabled:opacity-50";
     pill.className = `relative inline-flex shrink-0 items-center rounded-full transition-colors duration-200 ease-out h-5 w-8 ${
-      on ? "bg-token-charts-blue" : "bg-token-foreground/20"
+      opts.disabled ? "bg-token-foreground/10" : on ? "bg-token-charts-blue" : "bg-token-foreground/20"
     }`;
     pill.dataset.state = on ? "checked" : "unchecked";
     knob.dataset.state = on ? "checked" : "unchecked";
@@ -1782,6 +1908,14 @@ function folderIconSvg(): string {
   return (
     `<svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
     `<path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H8l1.5 1.8H14.5A2.5 2.5 0 0 1 17 8.3v5.2A2.5 2.5 0 0 1 14.5 16h-9A2.5 2.5 0 0 1 3 13.5v-7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>` +
+    `</svg>`
+  );
+}
+
+function spinnerIconSvg(): string {
+  return (
+    `<svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+    `<path d="M10 3a7 7 0 1 1-6.06 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>` +
     `</svg>`
   );
 }

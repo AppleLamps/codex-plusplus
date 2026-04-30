@@ -71,18 +71,31 @@ export async function patchAsar(
     } catch (e) {
       throw annotatePermError(e, asarPath);
     }
+    const rollbackPath = `${asarPath}.codexpp-prev`;
     try {
       if (process.platform === "win32") {
         // Windows rename-over-existing can leave a malformed asar in practice.
         // We already have a complete same-filesystem staging file, so overwrite
         // the target directly on Windows and keep rename for POSIX atomicity.
+        try { cpSync(asarPath, rollbackPath); } catch { /* rollback is best effort */ }
         copyFileSync(stagingPath, asarPath);
+        try {
+          readHeaderHash(asarPath);
+          try { unlinkSync(rollbackPath); } catch { /* best effort */ }
+        } catch (verifyError) {
+          try { copyFileSync(rollbackPath, asarPath); } catch { /* best effort */ }
+          throw new Error(
+            `Patched app.asar could not be verified after Windows replacement; restored the previous file if possible.\n` +
+              `Original verification error: ${(verifyError as Error).message}`,
+          );
+        }
         unlinkSync(stagingPath);
       } else {
         renameSync(stagingPath, asarPath);
       }
     } catch (e) {
       try { unlinkSync(stagingPath); } catch { /* best effort */ }
+      try { unlinkSync(rollbackPath); } catch { /* best effort */ }
       throw annotatePermError(e, asarPath);
     }
     asar.uncache(asarPath);
@@ -154,6 +167,19 @@ function annotatePermError(e: unknown, target: string): Error {
       `Grant permission via:\n` +
       `  System Settings → Privacy & Security → App Management → enable your terminal\n` +
       `(macOS may also have shown a permission prompt — click Allow, then re-run install.)\n\n` +
+      `Original error: ${err.message}`;
+    const wrapped = new Error(msg);
+    (wrapped as NodeJS.ErrnoException).code = err.code;
+    return wrapped;
+  }
+  if (err && (err.code === "EPERM" || err.code === "EACCES") && process.platform === "win32") {
+    const msg =
+      `Permission denied writing to ${target}.\n\n` +
+      `Windows may be holding Codex files open.\n` +
+      `Fix:\n` +
+      `  1. Quit Codex completely from the tray/taskbar\n` +
+      `  2. Re-run this command from PowerShell\n` +
+      `  3. If Codex is installed in a protected directory, re-run PowerShell as Administrator\n\n` +
       `Original error: ${err.message}`;
     const wrapped = new Error(msg);
     (wrapped as NodeJS.ErrnoException).code = err.code;

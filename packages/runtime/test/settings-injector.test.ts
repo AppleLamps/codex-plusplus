@@ -37,6 +37,11 @@ const electronMock = {
       if (channel === "codexpp:reload-tweaks") return Promise.resolve({ at: Date.now(), count: 1 });
       if (channel === "codexpp:reveal") return Promise.resolve(undefined);
       if (channel === "codexpp:copy-text") return Promise.resolve(true);
+      if (channel === "codexpp:user-paths") return Promise.resolve(defaultHealth.paths);
+      if (channel === "codexpp:create-support-bundle") {
+        return Promise.resolve({ dir: "/user/codex-plusplus/support/bundle" });
+      }
+      if (channel === "codexpp:copy-diagnostics-json") return Promise.resolve({ json: "{}" });
       if (channel === "codexpp:get-config") {
         return Promise.resolve({ version: "0.1.0", autoUpdate: true, updateCheck: null });
       }
@@ -46,7 +51,7 @@ const electronMock = {
           checkedAt: "2026-01-01T00:03:00.000Z",
           currentVersion: "0.1.0",
           latestVersion: "0.1.0",
-          releaseUrl: "https://github.com/b-nnett/codex-plusplus/releases",
+          releaseUrl: "https://github.com/AppleLamps/codex-plusplus/releases",
           releaseNotes: "No changes.",
           updateAvailable: false,
         });
@@ -108,7 +113,11 @@ test("renders unavailable tweaks in Needs Attention with friendly capability lab
   assert.match(document.body.textContent ?? "", /requires Codex\+\+ 99\.0\.0/);
   assert.match(document.body.textContent ?? "", /Renderer UI/);
   assert.match(document.body.textContent ?? "", /Runtime Requirement/);
-  assert.equal(document.querySelector<HTMLButtonElement>('[role="switch"]')?.disabled, true);
+  const toggle = document.querySelector<HTMLButtonElement>('[role="switch"]');
+  assert.equal(toggle?.disabled, true);
+  const reasonId = toggle?.getAttribute("aria-describedby");
+  assert.ok(reasonId);
+  assert.match(document.getElementById(reasonId)?.textContent ?? "", /requires Codex\+\+ 99\.0\.0/);
 });
 
 test("groups mixed tweaks and filters by search/status", () => {
@@ -143,6 +152,27 @@ test("groups mixed tweaks and filters by search/status", () => {
   assert.match(document.body.textContent ?? "", /Disabled Tweak/);
 });
 
+test("search preserves focus and selection across rerenders", () => {
+  injector.setListedTweaks([
+    tweak("enabled", { name: "Enabled Tweak" }),
+    tweak("disabled", { name: "Disabled Tweak", enabled: false }),
+  ]);
+
+  openTweaks();
+  const search = document.querySelector<HTMLInputElement>('input[aria-label="Search tweaks"]');
+  assert.ok(search);
+  search.focus();
+  search.value = "dis";
+  search.setSelectionRange(3, 3);
+  search.dispatchEvent(new Event("input"));
+
+  const nextSearch = document.querySelector<HTMLInputElement>('input[aria-label="Search tweaks"]');
+  assert.equal(document.activeElement, nextSearch);
+  assert.equal(nextSearch?.selectionStart, 3);
+  assert.match(document.body.textContent ?? "", /Disabled Tweak/);
+  assert.doesNotMatch(document.body.textContent ?? "", /Enabled Tweak/);
+});
+
 test("update rows and async actions surface success and error feedback", async () => {
   injector.setListedTweaks([
     tweak("flaky", { name: "Flaky Tweak", updateAvailable: true }),
@@ -164,6 +194,23 @@ test("update rows and async actions surface success and error feedback", async (
   click('button[aria-label="Reload tweaks"]');
   await flush();
   assert.match(document.body.textContent ?? "", /Reload failed: Error: reload denied/);
+});
+
+test("icon buttons show pending state while async work is in flight", async () => {
+  let resolveReload!: () => void;
+  invokeOverrides.set("codexpp:reload-tweaks", () => new Promise((resolve) => {
+    resolveReload = () => resolve({ at: Date.now(), count: 1 });
+  }));
+  injector.setListedTweaks([tweak("enabled", { name: "Enabled Tweak" })]);
+
+  openTweaks();
+  const reload = document.querySelector<HTMLButtonElement>('button[aria-label="Reload tweaks"]');
+  assert.ok(reload);
+  reload.click();
+  assert.equal(reload.disabled, true);
+  assert.equal(reload.getAttribute("aria-busy"), "true");
+  resolveReload();
+  await flush();
 });
 
 test("main-process tweak enable asks once per session", async () => {
@@ -217,6 +264,17 @@ test("Config renders health hub and maintenance copy actions", async () => {
     true,
   );
   assert.match(document.body.textContent ?? "", /Command copied/);
+
+  clickText("button", "Create support bundle");
+  await flush();
+  assert.equal(ipcCalls.some((c) => c.channel === "codexpp:create-support-bundle"), true);
+  assert.equal(
+    ipcCalls.some((c) => c.channel === "codexpp:copy-text" && c.args[0] === "/user/codex-plusplus/support/bundle"),
+    true,
+  );
+  clickText("button", "Copy diagnostics JSON");
+  await flush();
+  assert.equal(ipcCalls.some((c) => c.channel === "codexpp:copy-diagnostics-json"), true);
 });
 
 test("Config update checks show pending and error states", async () => {
@@ -236,6 +294,38 @@ test("Config update checks show pending and error states", async () => {
 
   assert.match(document.body.textContent ?? "", /Update check failed/);
   assert.match(document.body.textContent ?? "", /network down/);
+  click('button[aria-label="Check for Codex++ updates"]');
+  rejectUpdate(new Error("still down"));
+  await flush();
+  assert.equal((document.body.textContent?.match(/Update check failed/g) ?? []).length, 1);
+});
+
+test("Config ignores stale async responses and falls back to real user paths", async () => {
+  let resolveHealth!: (value: unknown) => void;
+  invokeOverrides.set("codexpp:runtime-health", () => new Promise((resolve) => {
+    resolveHealth = resolve;
+  }));
+
+  injector.__tryInjectForTests();
+  click('[data-codexpp="nav-config"]');
+  click('[data-codexpp="nav-tweaks"]');
+  resolveHealth({
+    ...defaultHealth,
+    recentErrors: [{ at: "2026-01-01T00:04:00.000Z", level: "error", message: "stale error" }],
+  });
+  await flush();
+  assert.doesNotMatch(document.body.textContent ?? "", /stale error/);
+
+  invokeOverrides.set("codexpp:runtime-health", () => Promise.resolve(null));
+  click('[data-codexpp="nav-config"]');
+  await flush();
+  clickText("button", "Open logs");
+  await flush();
+  assert.equal(
+    ipcCalls.some((c) => c.channel === "codexpp:reveal" && c.args[0] === defaultHealth.paths.logDir),
+    true,
+  );
+  assert.equal(ipcCalls.some((c) => c.channel === "codexpp:reveal" && c.args[0] === "<user dir>/log"), false);
 });
 
 test("registered tweak page render errors appear as polished error rows", () => {
@@ -253,6 +343,47 @@ test("registered tweak page render errors appear as polished error rows", () => 
   assert.match(document.body.textContent ?? "", /Main Process Access/);
   assert.match(document.body.textContent ?? "", /Error rendering page/);
   assert.match(document.body.textContent ?? "", /boom/);
+});
+
+test("external links route through safe open-external IPC", () => {
+  injector.setListedTweaks([
+    tweak("links", {
+      name: "Links Tweak",
+      homepage: "https://example.com/links",
+      updateAvailable: true,
+    }),
+  ]);
+
+  openTweaks();
+  clickByText("button", "owner/repo");
+  clickByText("button", "Homepage");
+  click('button[aria-label="View Release"]');
+
+  const urls = ipcCalls.filter((c) => c.channel === "codexpp:open-external").map((c) => c.args[0]);
+  assert.deepEqual(urls, [
+    "https://github.com/owner/repo",
+    "https://example.com/links",
+    "https://github.com/owner/repo/releases/tag/v1.1.0",
+  ]);
+});
+
+test("narrow fixture handles long metadata without duplicate rows", () => {
+  document.body.textContent = "";
+  buildSettingsFixture({ width: 320 });
+  injector.setListedTweaks([
+    tweak("long", {
+      name: "A Very Long Tweak Name That Should Wrap Cleanly In Narrow Codex Windows",
+      homepage: "https://example.com/a/very/long/homepage/path",
+      updateAvailable: true,
+      tags: ["very-long-tag-name-for-layout", "another-long-tag-name"],
+      capabilities: ["Renderer UI", "Main Process Access", "Local Data Storage", "Scoped IPC", "Custom Entry"],
+    }),
+  ]);
+
+  openTweaks();
+  assert.match(document.body.textContent ?? "", /A Very Long Tweak Name/);
+  assert.match(document.body.textContent ?? "", /Trust details/);
+  assert.equal(document.querySelectorAll('[role="switch"]').length, 1);
 });
 
 test("recovers after the settings container remounts", () => {
@@ -291,6 +422,8 @@ function tweak(
     loadError: string;
     capabilities: string[];
     updateAvailable: boolean;
+    homepage: string;
+    tags: string[];
   }> = {},
 ) {
   return {
@@ -300,6 +433,8 @@ function tweak(
       version: "1.0.0",
       githubRepo: "owner/repo",
       description: `${patch.name ?? id} description`,
+      ...(patch.homepage ? { homepage: patch.homepage } : {}),
+      ...(patch.tags ? { tags: patch.tags } : {}),
     },
     entry: `/tmp/${id}/index.js`,
     dir: `/tmp/${id}`,
@@ -334,6 +469,13 @@ function clickText(selector: string, nearbyText: string): void {
     return row?.textContent?.includes(nearbyText) === true;
   });
   assert.ok(match, `${selector} near ${nearbyText}`);
+  match.click();
+}
+
+function clickByText(selector: string, text: string): void {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  const match = candidates.find((el) => el.textContent?.includes(text));
+  assert.ok(match, `${selector} with ${text}`);
   match.click();
 }
 

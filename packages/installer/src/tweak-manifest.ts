@@ -13,6 +13,15 @@ export interface LocalTweakInfo {
   capabilities: string[];
 }
 
+export const CAPABILITY_DESCRIPTIONS: Record<string, string> = {
+  "Renderer UI": "can add renderer-side UI and settings",
+  "Main Process Access": "can run code in Codex's main process",
+  "Local Data Storage": "can read and write its own Codex++ data",
+  "Scoped IPC": "can communicate through Codex++ scoped IPC helpers",
+  "Custom Entry": "uses a custom manifest entry file",
+  "Runtime Requirement": "declares a minimum Codex++ runtime version",
+};
+
 interface ManifestLike {
   id?: unknown;
   name?: unknown;
